@@ -63,7 +63,7 @@ func TestPushThenPull(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 		man2 := Manage(sideB{conn})
 		ch2 := make(chan int, buf)
-		man2.Pull(ch2, "netchan")
+		man2.Pull(ch2, "netchan", 20)
 		for i := range ch2 {
 			s[i] = i
 		}
@@ -101,7 +101,7 @@ func TestPullThenPush(t *testing.T) {
 	go func() { // consumer
 		man2 := Manage(sideB{conn})
 		ch2 := make(chan int, buf)
-		man2.Pull(ch2, "netchan")
+		man2.Pull(ch2, "netchan", 20)
 		for i := range ch2 {
 			s[i] = i
 		}

@@ -12,21 +12,11 @@ func (e *errString) Error() string {
 	return string(*e)
 }
 
-type element struct {
-	Name string
-	val  reflect.Value // not exported, to be encoded/decoded separately
-	Ok   bool          // if not ok, the channel has been closed
-}
-
-type winUpdate struct {
-	Name string
-	Incr int // check not <= 0
-}
-
 type addReq struct { // request for adding (ch, name) to pusher or puller
-	ch   reflect.Value
-	name string
-	resp chan error
+	ch      reflect.Value
+	name    string
+	resp    chan error
+	bufSize int // puller only
 }
 
 type Manager struct {
@@ -44,17 +34,17 @@ func (m *Manager) Push(channel interface{}, name string) error {
 		return nil // error: manager will not be able to receive from the channel
 	}
 	resp := make(chan error, 1)
-	m.toPusher <- addReq{ch, name, resp}
+	m.toPusher <- addReq{ch, name, resp, 0}
 	return <-resp
 }
 
-func (m *Manager) Pull(channel interface{}, name string) error {
+func (m *Manager) Pull(channel interface{}, name string, bufSize int) error {
 	ch := reflect.ValueOf(channel)
 	if !checkChan(ch, reflect.SendDir) {
 		return nil // error: manager will not be able to send to the channel
 	}
 	resp := make(chan error, 1)
-	m.toPuller <- addReq{ch, name, resp}
+	m.toPuller <- addReq{ch, name, resp, bufSize}
 	return <-resp
 }
 

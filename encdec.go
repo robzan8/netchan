@@ -14,6 +14,17 @@ const (
 	winupMsg
 )
 
+type element struct {
+	Name string
+	val  reflect.Value // not exported, to be encoded/decoded separately
+	Ok   bool          // if not ok, the channel has been closed
+}
+
+type winUpdate struct {
+	Name string
+	Incr int // check not <= 0
+}
+
 func (t msgType) String() string {
 	switch t {
 	case elemMsg:
@@ -99,10 +110,7 @@ func (d *decoder) run() {
 			elemType, ok := d.types.m[elem.Name]
 			d.types.Unlock()
 			if !ok {
-				log.Fatal("netchan decoder: received element before its type was registered")
-				// this should be impossible, if peer behaves correctly:
-				// puller registers type, then puller transmits available window
-				// to peer pusher, then peer pusher transmits elements to us
+				log.Fatal("netchan decoder: received element of unknown type")
 			}
 			elem.val = reflect.New(elemType).Elem()
 			d.decodeVal(elem.val)

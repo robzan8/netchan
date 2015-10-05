@@ -28,20 +28,18 @@ func newPuller(elemCh <-chan element, toEncoder chan<- winUpdate, addReqCh <-cha
 	return p
 }
 
-const bufCap int = 20 // must be > 0
-
-func (p *puller) add(ch reflect.Value, name string) error {
+func (p *puller) add(ch reflect.Value, name string, bufSize int) error {
 	_, present := p.chans[name]
 	if present {
 		return nil // error, adding chan already present
 	}
-	buf := make(chan reflect.Value, bufCap)
+	buf := make(chan reflect.Value, bufSize)
 	p.chans[name] = &pullInfo{buf}
 	p.types.Lock()
 	p.types.m[name] = ch.Type().Elem()
 	p.types.Unlock()
 
-	go bufferer(buf, ch, p.toEncoder, name)
+	go bufferer(buf, ch, p.toEncoder, name, bufSize)
 	return nil
 }
 
@@ -59,9 +57,8 @@ func (p *puller) handleElem(elem element) {
 	}
 }
 
-func bufferer(buf <-chan reflect.Value, ch reflect.Value, toEncoder chan<- winUpdate, name string) {
-	chCap := ch.Cap()
-	toEncoder <- winUpdate{name, bufCap + chCap}
+func bufferer(buf <-chan reflect.Value, ch reflect.Value, toEncoder chan<- winUpdate, name string, bufSize int) {
+	toEncoder <- winUpdate{name, bufSize}
 	sent := 0
 	for {
 		val, ok := <-buf
@@ -71,9 +68,9 @@ func bufferer(buf <-chan reflect.Value, ch reflect.Value, toEncoder chan<- winUp
 		}
 		ch.Send(val)
 		sent++
-		if sent == bufCap+chCap {
-			toEncoder <- winUpdate{name, bufCap}
-			sent = bufCap
+		if sent*2 >= bufSize { // i.e. sent >= ceil(bufSize/2)
+			toEncoder <- winUpdate{name, sent}
+			sent = 0
 		}
 	}
 }
@@ -82,7 +79,7 @@ func (p *puller) run() {
 	for {
 		select {
 		case req := <-p.addReqCh:
-			req.resp <- p.add(req.ch, req.name)
+			req.resp <- p.add(req.ch, req.name, req.bufSize)
 		case elem := <-p.elemCh:
 			p.handleElem(elem)
 		}
