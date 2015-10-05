@@ -51,6 +51,7 @@ func (p *puller) handleElem(elem element) {
 		// when to discard elem because of full buffers because of misbehaving peer
 		info.buf <- elem.val
 	} else {
+		close(info.buf)
 		delete(p.chans, elem.Name)
 		p.types.Lock()
 		delete(p.types.m, elem.Name)

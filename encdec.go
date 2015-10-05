@@ -2,6 +2,7 @@ package netchan
 
 import (
 	"encoding/gob"
+	"log"
 	"reflect"
 )
 
@@ -12,6 +13,16 @@ const (
 	elemMsg
 	winupMsg
 )
+
+func (t msgType) String() string {
+	switch t {
+	case elemMsg:
+		return "elemMsg"
+	case winupMsg:
+		return "winupMsg"
+	}
+	return "???"
+}
 
 type encoder struct {
 	elemCh   <-chan element   // from pusher
@@ -38,9 +49,13 @@ func (e *encoder) run() {
 			e.encode(elemMsg)
 			e.encode(elem)
 			e.encodeVal(elem.val)
+
 		case winup := <-e.windowCh:
 			e.encode(winupMsg)
 			e.encode(winup)
+		}
+		if e.err != nil {
+			log.Fatal("netchan encoder: ", e.err)
 		}
 	}
 }
@@ -65,24 +80,47 @@ func (d *decoder) decode(v interface{}) {
 	d.decodeVal(reflect.ValueOf(v))
 }
 
+// TODO: detect when connection gets closed and shutdown everything
 func (d *decoder) run() {
 	for {
 		var typ msgType
-		d.dec.Decode(&typ)
+		d.decode(&typ)
+		if d.err != nil {
+			log.Fatal("netchan decoder: ", d.err)
+		}
 		switch typ {
 		case elemMsg:
 			var elem element
 			d.decode(&elem)
+			if d.err != nil {
+				log.Fatal("netchan decoder: ", d.err)
+			}
 			d.types.Lock()
-			elemType := d.types.m[elem.Name]
+			elemType, ok := d.types.m[elem.Name]
 			d.types.Unlock()
+			if !ok {
+				log.Fatal("netchan decoder: received element before its type was registered")
+				// this should be impossible, if peer behaves correctly:
+				// puller registers type, then puller transmits available window
+				// to peer pusher, then peer pusher transmits elements to us
+			}
 			elem.val = reflect.New(elemType).Elem()
 			d.decodeVal(elem.val)
+			if d.err != nil {
+				log.Fatal("netchan decoder: ", d.err)
+			}
 			d.toPuller <- elem
+
 		case winupMsg:
 			var winup winUpdate
 			d.decode(&winup)
+			if d.err != nil {
+				log.Fatal("netchan decoder: ", d.err)
+			}
 			d.toPusher <- winup
+
+		default:
+			log.Fatal("netchan decoder: invalid message type ", typ)
 		}
 	}
 }

@@ -1,42 +1,51 @@
 package netchan
 
 import (
-	"bytes"
+	"io"
 	"testing"
 	"time"
 )
 
+// simulate full duplex connection
 type connection struct {
-	buf1, buf2 bytes.Buffer
+	readA, readB   *io.PipeReader
+	writeA, writeB *io.PipeWriter
 }
 
-// simulate full duplex connection
-type sideA struct {
-	conn *connection
+func newConn() *connection {
+	c := new(connection)
+	c.readA, c.writeB = io.Pipe()
+	c.readB, c.writeA = io.Pipe()
+	return c
 }
-type sideB struct {
+
+type sideA struct {
 	conn *connection
 }
 
 func (c sideA) Read(s []byte) (int, error) {
-	return c.conn.buf1.Read(s)
+	return c.conn.readA.Read(s)
 }
 func (c sideA) Write(s []byte) (int, error) {
-	return c.conn.buf2.Write(s)
+	return c.conn.writeA.Write(s)
+}
+
+type sideB struct {
+	conn *connection
 }
 
 func (c sideB) Read(s []byte) (int, error) {
-	return c.conn.buf2.Read(s)
+	return c.conn.readB.Read(s)
 }
 func (c sideB) Write(s []byte) (int, error) {
-	return c.conn.buf1.Write(s)
+	return c.conn.writeB.Write(s)
 }
 
 func TestPushThenPull(t *testing.T) {
 	n := 50
 	buf := 10
 
-	conn := new(connection)
+	conn := newConn()
 	s := make([]int, n)
 	done := make(chan struct{})
 
@@ -51,7 +60,7 @@ func TestPushThenPull(t *testing.T) {
 	}()
 
 	go func() { // consumer
-		time.Sleep(300 * time.Millisecond)
+		time.Sleep(50 * time.Millisecond)
 		man2 := Manage(sideB{conn})
 		ch2 := make(chan int, buf)
 		man2.Pull(ch2, "netchan")
@@ -74,12 +83,12 @@ func TestPullThenPush(t *testing.T) {
 	n := 50
 	buf := 10
 
-	conn := new(connection)
+	conn := newConn()
 	s := make([]int, n)
 	done := make(chan struct{})
 
 	go func() { // producer
-		time.Sleep(300 * time.Millisecond)
+		time.Sleep(50 * time.Millisecond)
 		man1 := Manage(sideA{conn})
 		ch1 := make(chan int, buf)
 		man1.Push(ch1, "netchan")

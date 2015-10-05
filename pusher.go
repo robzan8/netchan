@@ -57,10 +57,11 @@ func (p *pusher) handleWinup(winup winUpdate) {
 
 func (p *pusher) handleElem(name string, val reflect.Value, ok bool) {
 	p.toEncoder <- element{name, val, ok}
-	p.chans[name].win--
 	if !ok {
 		delete(p.chans, name)
+		return
 	}
+	p.chans[name].win--
 }
 
 func (p *pusher) run() {
