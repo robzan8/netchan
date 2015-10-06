@@ -2,6 +2,7 @@ package netchan
 
 import (
 	"io"
+	"sync"
 	"testing"
 	"time"
 )
@@ -43,7 +44,8 @@ func (c sideB) Write(s []byte) (int, error) {
 
 func TestPushThenPull(t *testing.T) {
 	n := 50
-	buf := 10
+	smallBuf := 10
+	bigBuf := 20
 
 	conn := newConn()
 	s := make([]int, n)
@@ -51,8 +53,8 @@ func TestPushThenPull(t *testing.T) {
 
 	go func() { // producer
 		man1 := Manage(sideA{conn})
-		ch1 := make(chan int, buf)
-		man1.Push(ch1, "netchan")
+		ch1 := make(chan int, smallBuf)
+		man1.Push("netchan test", ch1)
 		for i := 0; i < n; i++ {
 			ch1 <- i
 		}
@@ -62,8 +64,8 @@ func TestPushThenPull(t *testing.T) {
 	go func() { // consumer
 		time.Sleep(50 * time.Millisecond)
 		man2 := Manage(sideB{conn})
-		ch2 := make(chan int, buf)
-		man2.Pull(ch2, "netchan", 20)
+		ch2 := make(chan int, smallBuf)
+		man2.Pull("netchan test", ch2, bigBuf)
 		for i := range ch2 {
 			s[i] = i
 		}
@@ -81,7 +83,8 @@ func TestPushThenPull(t *testing.T) {
 
 func TestPullThenPush(t *testing.T) {
 	n := 50
-	buf := 10
+	smallBuf := 10
+	bigBuf := 20
 
 	conn := newConn()
 	s := make([]int, n)
@@ -90,8 +93,8 @@ func TestPullThenPush(t *testing.T) {
 	go func() { // producer
 		time.Sleep(50 * time.Millisecond)
 		man1 := Manage(sideA{conn})
-		ch1 := make(chan int, buf)
-		man1.Push(ch1, "netchan")
+		ch1 := make(chan int, smallBuf)
+		man1.Push("netchan test", ch1)
 		for i := 0; i < n; i++ {
 			ch1 <- i
 		}
@@ -100,8 +103,8 @@ func TestPullThenPush(t *testing.T) {
 
 	go func() { // consumer
 		man2 := Manage(sideB{conn})
-		ch2 := make(chan int, buf)
-		man2.Pull(ch2, "netchan", 20)
+		ch2 := make(chan int, smallBuf)
+		man2.Pull("netchan test", ch2, bigBuf)
 		for i := range ch2 {
 			s[i] = i
 		}
@@ -113,6 +116,81 @@ func TestPullThenPush(t *testing.T) {
 		if i != j {
 			t.Error("faileddddddddd", s)
 			return
+		}
+	}
+}
+
+func TestManyChans(t *testing.T) {
+	n := 500
+	smallBuf := 10
+	bigBuf := 100
+
+	conn := newConn()
+	var s [3][]int
+	var wg sync.WaitGroup
+	wg.Add(3)
+
+	manA := Manage(sideA{conn})
+	manB := Manage(sideB{conn})
+
+	go func() { // producer1
+		ch1 := make(chan int, smallBuf)
+		manA.Push("netchan test1", ch1)
+		for i := 0; i < n; i++ {
+			ch1 <- i
+		}
+		close(ch1)
+	}()
+	go func() { // consumer1
+		ch2 := make(chan int, smallBuf)
+		manB.Pull("netchan test1", ch2, bigBuf)
+		for i := range ch2 {
+			s[0] = append(s[0], i)
+		}
+		wg.Done()
+	}()
+
+	go func() { // producer2
+		ch1 := make(chan int, smallBuf)
+		manB.Push("netchan test2", ch1)
+		for i := 0; i < n; i++ {
+			ch1 <- i
+		}
+		close(ch1)
+	}()
+	go func() { // consumer2
+		ch2 := make(chan int, smallBuf)
+		manA.Pull("netchan test2", ch2, bigBuf)
+		for i := range ch2 {
+			s[1] = append(s[1], i)
+		}
+		wg.Done()
+	}()
+
+	go func() { // producer3
+		ch1 := make(chan int, smallBuf)
+		manA.Push("netchan test3", ch1)
+		for i := 0; i < n; i++ {
+			ch1 <- i
+		}
+		close(ch1)
+	}()
+	go func() { // consumer3
+		ch2 := make(chan int, smallBuf)
+		manB.Pull("netchan test3", ch2, bigBuf)
+		for i := range ch2 {
+			s[2] = append(s[2], i)
+		}
+		wg.Done()
+	}()
+
+	wg.Wait()
+	for k := 0; k < 3; k++ {
+		for i, j := range s[k] {
+			if i != j {
+				t.Error("faileddddddddd")
+				return
+			}
 		}
 	}
 }

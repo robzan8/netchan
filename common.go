@@ -28,7 +28,7 @@ func checkChan(ch reflect.Value, dir reflect.ChanDir) bool {
 	return ch.Kind() == reflect.Chan && ch.Type().ChanDir()&dir != 0
 }
 
-func (m *Manager) Push(channel interface{}, name string) error {
+func (m *Manager) Push(name string, channel interface{}) error {
 	ch := reflect.ValueOf(channel)
 	if !checkChan(ch, reflect.RecvDir) {
 		return nil // error: manager will not be able to receive from the channel
@@ -38,7 +38,7 @@ func (m *Manager) Push(channel interface{}, name string) error {
 	return <-resp
 }
 
-func (m *Manager) Pull(channel interface{}, name string, bufSize int) error {
+func (m *Manager) Pull(name string, channel interface{}, bufSize int) error {
 	ch := reflect.ValueOf(channel)
 	if !checkChan(ch, reflect.SendDir) {
 		return nil // error: manager will not be able to send to the channel
