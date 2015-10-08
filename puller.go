@@ -1,6 +1,7 @@
 package netchan
 
 import (
+	"log"
 	"reflect"
 	"sync"
 )
@@ -11,7 +12,7 @@ type pullInfo struct {
 
 type typeMap struct {
 	sync.Mutex
-	m map[string]reflect.Type
+	m map[chanID]reflect.Type
 }
 
 type puller struct {
@@ -19,46 +20,49 @@ type puller struct {
 	toEncoder chan<- winUpdate
 	addReqCh  <-chan addReq // from Manager.Pull (user)
 
-	chans map[string]*pullInfo
+	chans map[chanID]*pullInfo
 	types *typeMap
 }
 
 func newPuller(elemCh <-chan element, toEncoder chan<- winUpdate, addReqCh <-chan addReq, types *typeMap) *puller {
-	p := &puller{elemCh, toEncoder, addReqCh, make(map[string]*pullInfo), types}
+	p := &puller{elemCh, toEncoder, addReqCh, make(map[chanID]*pullInfo), types}
 	return p
 }
 
-func (p *puller) add(ch reflect.Value, name string, bufSize int) error {
-	_, present := p.chans[name]
+func (p *puller) add(ch reflect.Value, id chanID, bufCap int) error {
+	_, present := p.chans[id]
 	if present {
-		return nil // error, adding chan already present
+		log.Fatal("netchan puller: adding channel already present")
+		return nil
 	}
-	buf := make(chan reflect.Value, bufSize)
-	p.chans[name] = &pullInfo{buf}
+	buf := make(chan reflect.Value, bufCap)
+	p.chans[id] = &pullInfo{buf}
 	p.types.Lock()
-	p.types.m[name] = ch.Type().Elem()
+	p.types.m[id] = ch.Type().Elem()
 	p.types.Unlock()
 
-	go bufferer(buf, ch, p.toEncoder, name, bufSize)
+	go bufferer(buf, ch, p.toEncoder, id, bufCap)
 	return nil
 }
 
 func (p *puller) handleElem(elem element) {
-	info := p.chans[elem.Name]
+	info := p.chans[elem.ChID]
 	if elem.Ok {
-		// when to discard elem because of full buffers because of misbehaving peer
+		if len(info.buf) == cap(info.buf) {
+			log.Fatal("netchan puller: window size exceeded")
+		}
 		info.buf <- elem.val
 	} else {
 		close(info.buf)
-		delete(p.chans, elem.Name)
+		delete(p.chans, elem.ChID)
 		p.types.Lock()
-		delete(p.types.m, elem.Name)
+		delete(p.types.m, elem.ChID)
 		p.types.Unlock()
 	}
 }
 
-func bufferer(buf <-chan reflect.Value, ch reflect.Value, toEncoder chan<- winUpdate, name string, bufSize int) {
-	toEncoder <- winUpdate{name, bufSize}
+func bufferer(buf <-chan reflect.Value, ch reflect.Value, toEncoder chan<- winUpdate, id chanID, bufCap int) {
+	toEncoder <- winUpdate{id, bufCap}
 	sent := 0
 	for {
 		val, ok := <-buf
@@ -68,8 +72,8 @@ func bufferer(buf <-chan reflect.Value, ch reflect.Value, toEncoder chan<- winUp
 		}
 		ch.Send(val)
 		sent++
-		if sent*2 >= bufSize { // i.e. sent >= ceil(bufSize/2)
-			toEncoder <- winUpdate{name, sent}
+		if sent*2 >= bufCap { // i.e. sent >= ceil(bufCap/2)
+			toEncoder <- winUpdate{id, sent}
 			sent = 0
 		}
 	}
@@ -79,7 +83,7 @@ func (p *puller) run() {
 	for {
 		select {
 		case req := <-p.addReqCh:
-			req.resp <- p.add(req.ch, req.name, req.bufSize)
+			req.resp <- p.add(req.ch, req.id, req.bufCap)
 		case elem := <-p.elemCh:
 			p.handleElem(elem)
 		}

@@ -15,13 +15,13 @@ const (
 )
 
 type element struct {
-	Name string
+	ChID chanID
 	val  reflect.Value // not exported, to be encoded/decoded separately
 	Ok   bool          // if not ok, the channel has been closed
 }
 
 type winUpdate struct {
-	Name string
+	ChID chanID
 	Incr int // check not <= 0
 }
 
@@ -107,7 +107,7 @@ func (d *decoder) run() {
 				log.Fatal("netchan decoder: ", d.err)
 			}
 			d.types.Lock()
-			elemType, ok := d.types.m[elem.Name]
+			elemType, ok := d.types.m[elem.ChID]
 			d.types.Unlock()
 			if !ok {
 				log.Fatal("netchan decoder: received element of unknown type")

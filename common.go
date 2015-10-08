@@ -1,10 +1,14 @@
 package netchan
 
 import (
+	"crypto/sha1"
 	"encoding/gob"
 	"io"
 	"reflect"
 )
+
+// a chan ID is the sha1 sum of its name
+type chanID [20]byte
 
 type errString string
 
@@ -13,10 +17,10 @@ func (e *errString) Error() string {
 }
 
 type addReq struct { // request for adding (ch, name) to pusher or puller
-	ch      reflect.Value
-	name    string
-	resp    chan error
-	bufSize int // puller only
+	ch     reflect.Value
+	id     chanID
+	resp   chan error
+	bufCap int // puller only
 }
 
 type Manager struct {
@@ -34,17 +38,17 @@ func (m *Manager) Push(name string, channel interface{}) error {
 		return nil // error: manager will not be able to receive from the channel
 	}
 	resp := make(chan error, 1)
-	m.toPusher <- addReq{ch, name, resp, 0}
+	m.toPusher <- addReq{ch, sha1.Sum([]byte(name)), resp, 0}
 	return <-resp
 }
 
-func (m *Manager) Pull(name string, channel interface{}, bufSize int) error {
+func (m *Manager) Pull(name string, channel interface{}, bufCap int) error {
 	ch := reflect.ValueOf(channel)
 	if !checkChan(ch, reflect.SendDir) {
 		return nil // error: manager will not be able to send to the channel
 	}
 	resp := make(chan error, 1)
-	m.toPuller <- addReq{ch, name, resp, bufSize}
+	m.toPuller <- addReq{ch, sha1.Sum([]byte(name)), resp, bufCap}
 	return <-resp
 }
 
@@ -59,7 +63,7 @@ func Manage(conn io.ReadWriter) *Manager {
 	encWindowCh := make(chan winUpdate, chCap)
 	enc := &encoder{encElemCh, encWindowCh, gob.NewEncoder(conn), nil}
 
-	types := &typeMap{m: make(map[string]reflect.Type)}
+	types := &typeMap{m: make(map[chanID]reflect.Type)}
 
 	decElemCh := make(chan element, chCap)
 	decWindowCh := make(chan winUpdate, chCap)

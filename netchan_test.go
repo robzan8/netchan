@@ -1,7 +1,9 @@
 package netchan
 
 import (
+	"fmt"
 	"io"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -9,14 +11,17 @@ import (
 
 // simulate full duplex connection
 type connection struct {
-	readA, readB   *io.PipeReader
-	writeA, writeB *io.PipeWriter
+	readA, readB   io.Reader
+	writeA, writeB io.Writer
 }
 
 func newConn() *connection {
 	c := new(connection)
 	c.readA, c.writeB = io.Pipe()
-	c.readB, c.writeA = io.Pipe()
+	//c.readB, c.writeA = io.Pipe()
+	r, w := io.Pipe()
+	c.readB = NewLimGobReader(r, 1000)
+	c.writeA = w
 	return c
 }
 
@@ -45,7 +50,7 @@ func (c sideB) Write(s []byte) (int, error) {
 func TestPushThenPull(t *testing.T) {
 	n := 50
 	smallBuf := 10
-	bigBuf := 20
+	bigBuf := 700
 
 	conn := newConn()
 	s := make([]int, n)
@@ -84,7 +89,7 @@ func TestPushThenPull(t *testing.T) {
 func TestPullThenPush(t *testing.T) {
 	n := 50
 	smallBuf := 10
-	bigBuf := 20
+	bigBuf := 700
 
 	conn := newConn()
 	s := make([]int, n)
@@ -183,6 +188,10 @@ func TestManyChans(t *testing.T) {
 		}
 		wg.Done()
 	}()
+
+	var mem runtime.MemStats
+	runtime.ReadMemStats(&mem)
+	fmt.Println("memory!!!!!!!!!", mem.Alloc)
 
 	wg.Wait()
 	for k := 0; k < 3; k++ {
