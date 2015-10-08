@@ -20,7 +20,7 @@ func newConn() *connection {
 	c.readA, c.writeB = io.Pipe()
 	//c.readB, c.writeA = io.Pipe()
 	r, w := io.Pipe()
-	c.readB = NewLimGobReader(r, 1000)
+	c.readB = NewLimGobReader(r, 60)
 	c.writeA = w
 	return c
 }

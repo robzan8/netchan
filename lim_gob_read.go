@@ -19,8 +19,8 @@ type bufReader interface {
 
 type LimGobReader struct {
 	r    bufReader
-	max  uint64
-	next int
+	max  uint64 // maximum size of gob message allowed
+	next int    // counts how many bytes are left before reaching the next length of message
 }
 
 func NewLimGobReader(r io.Reader, n int64) *LimGobReader {
@@ -35,40 +35,22 @@ func NewLimGobReader(r io.Reader, n int64) *LimGobReader {
 }
 
 func (l *LimGobReader) Read(buf []byte) (total int, err error) {
-	for len(buf) > 0 {
-		// if we are not there yet, read up to the next message length counter or
-		// up to len(buf) limit, whatever comes first (min)
-		if l.next > 0 {
-			min := len(buf)
-			if min > l.next {
-				min = l.next
-			}
-			// min > 0 here
-			var n int
-			n, err = l.r.Read(buf[:min])
-			total += n
-			l.next -= n
-			buf = buf[min:]
-			if n < min || err != nil || len(buf) == 0 {
-				return
-			}
-		}
-
-		// we reached a new counter and buf still has space;
-		// parsing of the counter is done with peek, to leave the reader
-		// in a consistent state in case of errors
+	if len(buf) == 0 {
+		return
+	}
+	if l.next == 0 {
+		// reached the length of a new message,
+		// parse it like decodeUintReader in gob/decode.go
 		var p []byte
 		p, err = l.r.Peek(1)
-		if len(p) < 1 || err != nil {
-			log.Fatal("noooooooooo")
+		if err != nil {
 			return
 		}
-		// retrieve message length
 		var width int
 		var msgLen uint64
 		count := p[0]
 		if count <= 0x7f {
-			width = 0
+			width = 1
 			msgLen = uint64(count)
 		} else {
 			width = -int(int8(count))
@@ -77,43 +59,59 @@ func (l *LimGobReader) Read(buf []byte) (total int, err error) {
 				// set err
 				return
 			}
+			width++ // +1 for the count byte
 			p, err = l.r.Peek(width)
-			if len(p) < width || err != nil {
+			if err != nil {
 				if err == io.EOF {
 					err = io.ErrUnexpectedEOF
 				}
-				log.Fatal("peek unexpected EOF")
+				log.Fatal("peek failed")
 				return
 			}
 			// Could check that the high byte is zero but it's not worth it.
-			for _, b := range p {
+			for _, b := range p[1:] {
 				msgLen = msgLen<<8 | uint64(b)
 			}
 		}
-
 		if msgLen > l.max || msgLen > tooBig {
 			log.Fatal("size exceeded")
 			// set err
 			return
 		}
-		buf[0] = count
-		n := copy(buf[1:], p[:width])
-		n++
+		n := copy(buf, p)
+		_, err = l.r.Discard(n)
+		if err != nil {
+			log.Fatal("we peeked #width, we should be able to discard n <= width")
+			// keep reader state consistent
+		}
 		total += n
 		buf = buf[n:]
-		/*m, err := l.r.Discard(n)
-		if m < n || err != nil {
-			log.Fatal("damn, we were so close")
-		}*/
-		l.next = int(msgLen) // tooBig protects form overflow
+		l.next = int(msgLen) + width - n // tooBig protects form overflow
+		if len(buf) == 0 {
+			return
+		}
 	}
+
+	// if we are not there yet, read up to the next message length counter or
+	// up to len(buf) limit, whatever comes first (min)
+	min := len(buf)
+	if min > l.next {
+		min = l.next
+	}
+	// min > 0 here
+	var n int
+	n, err = l.r.Read(buf[:min])
+	total += n
+	l.next -= n
 	return
 }
 
+// ReadByte is provided so that gob understands that this reader is buffered;
+// see https://golang.org/pkg/encoding/gob/#NewDecoder
+// The implementation is not efficient, but gob doesn't actually call the function.
 func (l *LimGobReader) ReadByte() (c byte, err error) {
-	log.Fatal("I don't want gob to actually call this")
 	var b [1]byte
-	_, err = l.Read(b[:])
+	_, err = io.ReadFull(l, b[:])
 	c = b[0]
 	return
 }
