@@ -86,8 +86,10 @@ func (p *puller) run() {
 		select {
 		case req := <-p.addReqCh:
 			req.resp <- p.add(req.ch, req.id)
-		case elem := <-p.elemCh:
-			p.handleElem(elem)
+		case elem, ok := <-p.elemCh:
+			if ok {
+				p.handleElem(elem)
+			}
 		}
 	}
 }
