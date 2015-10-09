@@ -29,7 +29,9 @@ func newPuller(elemCh <-chan element, toEncoder chan<- winUpdate, addReqCh <-cha
 	return p
 }
 
-func (p *puller) add(ch reflect.Value, id chanID, bufCap int) error {
+const bufCap = 512
+
+func (p *puller) add(ch reflect.Value, id chanID) error {
 	_, present := p.chans[id]
 	if present {
 		log.Fatal("netchan puller: adding channel already present")
@@ -41,7 +43,7 @@ func (p *puller) add(ch reflect.Value, id chanID, bufCap int) error {
 	p.types.m[id] = ch.Type().Elem()
 	p.types.Unlock()
 
-	go bufferer(buf, ch, p.toEncoder, id, bufCap)
+	go bufferer(buf, ch, p.toEncoder, id)
 	return nil
 }
 
@@ -61,7 +63,7 @@ func (p *puller) handleElem(elem element) {
 	}
 }
 
-func bufferer(buf <-chan reflect.Value, ch reflect.Value, toEncoder chan<- winUpdate, id chanID, bufCap int) {
+func bufferer(buf <-chan reflect.Value, ch reflect.Value, toEncoder chan<- winUpdate, id chanID) {
 	toEncoder <- winUpdate{id, bufCap}
 	sent := 0
 	for {
@@ -83,7 +85,7 @@ func (p *puller) run() {
 	for {
 		select {
 		case req := <-p.addReqCh:
-			req.resp <- p.add(req.ch, req.id, req.bufCap)
+			req.resp <- p.add(req.ch, req.id)
 		case elem := <-p.elemCh:
 			p.handleElem(elem)
 		}

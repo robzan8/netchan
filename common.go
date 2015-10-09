@@ -17,10 +17,9 @@ func (e *errString) Error() string {
 }
 
 type addReq struct { // request for adding (ch, name) to pusher or puller
-	ch     reflect.Value
-	id     chanID
-	resp   chan error
-	bufCap int // puller only
+	ch   reflect.Value
+	id   chanID
+	resp chan error
 }
 
 type Manager struct {
@@ -38,17 +37,17 @@ func (m *Manager) Push(name string, channel interface{}) error {
 		return nil // error: manager will not be able to receive from the channel
 	}
 	resp := make(chan error, 1)
-	m.toPusher <- addReq{ch, sha1.Sum([]byte(name)), resp, 0}
+	m.toPusher <- addReq{ch, sha1.Sum([]byte(name)), resp}
 	return <-resp
 }
 
-func (m *Manager) Pull(name string, channel interface{}, bufCap int) error {
+func (m *Manager) Pull(name string, channel interface{}) error {
 	ch := reflect.ValueOf(channel)
 	if !checkChan(ch, reflect.SendDir) {
 		return nil // error: manager will not be able to send to the channel
 	}
 	resp := make(chan error, 1)
-	m.toPuller <- addReq{ch, sha1.Sum([]byte(name)), resp, bufCap}
+	m.toPuller <- addReq{ch, sha1.Sum([]byte(name)), resp}
 	return <-resp
 }
 

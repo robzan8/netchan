@@ -97,7 +97,7 @@ func (l *LimGobReader) readAtCounter(buf []byte) (n int, err error) {
 		return
 	}
 	n, err = l.r.Discard(copy(buf, p))
-	l.next = int(msgLen) + width - n // tooBig protects form overflow
+	l.next = int(msgLen) + width - n // tooBig check prevents overflow
 	return
 }
 
