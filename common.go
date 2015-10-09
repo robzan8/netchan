@@ -52,7 +52,7 @@ func (m *Manager) Pull(name string, channel interface{}) error {
 }
 
 func Manage(conn io.ReadWriter) *Manager {
-	const chCap int = 8
+	const chCap int = 0
 
 	pushAddCh := make(chan addReq, chCap)
 	pullAddCh := make(chan addReq, chCap)
