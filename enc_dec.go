@@ -49,6 +49,9 @@ func (e *encoder) encodeVal(v reflect.Value) {
 		return
 	}
 	e.err = e.enc.EncodeValue(v)
+	if e.err != nil {
+		e.man.signalError(e.err)
+	}
 }
 
 func (e *encoder) encode(v interface{}) {
@@ -59,22 +62,19 @@ func (e *encoder) run() {
 	for {
 		select {
 		case elem, ok := <-e.elemCh:
-			if !ok { // pusher saw an error
+			if ok {
+				e.encode(elemMsg)
+				e.encode(elem)
+				e.encodeVal(elem.val)
+			} else {
+				// error occurred and pusher shut down
 				e.encode(errorMsg)
 				e.encode(e.man.Error().Error())
-				return // hope peer gets it
+				return
 			}
-			e.encode(elemMsg)
-			e.encode(elem)
-			e.encodeVal(elem.val)
-
 		case winup := <-e.windowCh:
 			e.encode(winupMsg)
 			e.encode(winup)
-		}
-		if e.err != nil {
-			e.man.signalError(e.err)
-			// do not return, wait that pusher is done?
 		}
 	}
 }
@@ -88,60 +88,68 @@ type decoder struct {
 	types *typeMap
 }
 
-// TODO: detect when connection gets closed and shutdown everything
+func (d *decoder) decodeVal(v reflect.Value) {
+	if d.err != nil {
+		return
+	}
+	d.err = d.dec.DecodeValue(v)
+	if d.err != nil {
+		d.man.signalError(d.err)
+	}
+}
+
+func (d *decoder) decode(v interface{}) {
+	d.decodeVal(reflect.ValueOf(v))
+}
+
+func (d *decoder) newElem(id chanID) reflect.Value {
+	if d.err != nil {
+		return reflect.Value{}
+	}
+	d.types.Lock()
+	typ, ok := d.types.m[id]
+	d.types.Unlock()
+	if ok {
+		return reflect.New(typ).Elem()
+	}
+	d.err = errUnwantedElem
+	d.man.signalError(errUnwantedElem)
+	return reflect.Value{}
+}
+
 func (d *decoder) run() {
 	for {
-		err := d.man.Error()
-		if err != nil {
-			return d.handleError(err)
-		}
-
 		var typ msgType
-		err = d.dec.decode(&typ)
-		if err != nil {
-			return d.handleError(err)
+		d.decode(&typ)
+		if d.man.Error() != nil {
+			close(d.toPuller)
+			return
 		}
 		switch typ {
 		case elemMsg:
 			var elem element
-			err := d.dec.Decode(&elem)
-			if err != nil {
-				return d.handleError(err)
+			d.decode(&elem)
+			elem.val = d.newElem(elem.ChID)
+			d.decodeVal(elem.val)
+			if d.err == nil {
+				d.toPuller <- elem
 			}
-			d.types.Lock()
-			elemType, ok := d.types.m[elem.ChID]
-			d.types.Unlock()
-			if !ok {
-				return d.handleError(errUnwantedElem)
-			}
-			elem.val = reflect.New(elemType).Elem()
-			err = d.dec.DecodeValue(elem.val)
-			if err != nil {
-				return d.handleError(err)
-			}
-			d.toPuller <- elem
-
 		case winupMsg:
 			var winup winUpdate
-			err := d.dec.Decode(&winup)
-			if err != nil {
-				return d.handleError(err)
+			d.decode(&winup)
+			if d.err == nil {
+				d.toPusher <- winup
 			}
-			d.toPusher <- winup
-
 		case errorMsg:
 			var errString string
-			d.dec.Decode(&errString)
-			return d.handleError(errors.New(errString))
-			// infinite loop of error signaling between peers?
-
+			d.decode(&errString)
+			if d.err == nil {
+				d.err = errors.New(errString)
+				d.man.signalError(d.err)
+			}
 		default:
-			return d.handleError(errInvalidMsgType)
+			d.err = errInvalidMsgType
+			d.man.signalError(errInvalidMsgType)
 		}
 	}
-}
-
-func (d *decoder) handleError(err error) {
-	d.man.signalError(err)
-	close(d.toPuller)
 }
