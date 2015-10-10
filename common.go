@@ -6,6 +6,7 @@ import (
 	"io"
 	"reflect"
 	"sync"
+	"sync/atomic"
 )
 
 // a chan ID is the sha1 sum of its name
@@ -27,8 +28,8 @@ type Manager struct {
 	toPusher chan<- addReq
 	toPuller chan<- addReq
 	errMu    sync.Mutex
+	err      atomic.Value // error
 	gotErr   chan struct{}
-	err      error
 }
 
 func checkChan(ch reflect.Value, dir reflect.ChanDir) bool {
@@ -42,7 +43,12 @@ func (m *Manager) Push(name string, channel interface{}) error {
 	}
 	resp := make(chan error, 1)
 	m.toPusher <- addReq{ch, sha1.Sum([]byte(name)), resp}
-	return <-resp
+	select {
+	case err := <-resp:
+		return err
+	case <-m.GotError():
+		return m.Error()
+	}
 }
 
 func (m *Manager) Pull(name string, channel interface{}) error {
@@ -52,7 +58,12 @@ func (m *Manager) Pull(name string, channel interface{}) error {
 	}
 	resp := make(chan error, 1)
 	m.toPuller <- addReq{ch, sha1.Sum([]byte(name)), resp}
-	return <-resp
+	select {
+	case err := <-resp:
+		return err
+	case <-m.GotError():
+		return m.Error()
+	}
 }
 
 func Manage(conn io.ReadWriter) *Manager {
@@ -72,8 +83,8 @@ func Manage(conn io.ReadWriter) *Manager {
 	decWindowCh := make(chan winUpdate, chCap)
 	dec := &decoder{decElemCh, decWindowCh, gob.NewDecoder(conn), nil, m, types}
 
-	push := newPusher(encElemCh, decWindowCh, pushAddCh)
-	pull := newPuller(decElemCh, encWindowCh, pullAddCh, types)
+	push := newPusher(encElemCh, decWindowCh, pushAddCh, m)
+	pull := newPuller(decElemCh, encWindowCh, pullAddCh, m, types)
 
 	go enc.run()
 	go dec.run()
@@ -85,10 +96,11 @@ func Manage(conn io.ReadWriter) *Manager {
 func (m *Manager) signalError(err error) error {
 	m.errMu.Lock()
 	defer m.errMu.Unlock()
-	if m.err != nil { // someone signaled an error before us
-		return m.err
+	prevErr := m.Error()
+	if prevErr != nil { // someone signaled an error before us
+		return prevErr
 	}
-	m.err = err
+	m.err.Store(err)
 	close(m.gotErr)
 	return err
 }
@@ -98,7 +110,5 @@ func (m *Manager) GotError() <-chan struct{} {
 }
 
 func (m *Manager) Error() error {
-	m.errMu.Lock()
-	defer m.errMu.Unlock()
-	return m.err
+	return m.err.Load().(error)
 }
