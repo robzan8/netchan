@@ -59,6 +59,7 @@ func (e *encoder) encode(v interface{}) {
 }
 
 func (e *encoder) run() {
+loop:
 	for {
 		select {
 		case elem, ok := <-e.elemCh:
@@ -66,17 +67,30 @@ func (e *encoder) run() {
 				e.encode(elemMsg)
 				e.encode(elem)
 				e.encodeVal(elem.val)
-			} else {
-				// error occurred and pusher shut down
-				e.encode(errorMsg)
-				e.encode(e.man.Error().Error())
-				return
+				continue loop
 			}
-		case winup := <-e.windowCh:
-			e.encode(winupMsg)
-			e.encode(winup)
+			// error occurred and pusher shut down
+			if e.windowCh == nil {
+				break loop
+			}
+			e.elemCh = nil
+
+		case winup, ok := <-e.windowCh:
+			if ok {
+				e.encode(winupMsg)
+				e.encode(winup)
+				continue loop
+			}
+			// error occurred and puller shut down
+			if e.elemCh == nil {
+				break loop
+			}
+			e.windowCh = nil
 		}
 	}
+	e.encode(errorMsg)
+	e.encode(e.man.Error().Error())
+	// hope peer gets the error
 }
 
 type decoder struct {
@@ -113,7 +127,7 @@ func (d *decoder) newElem(id chanID) reflect.Value {
 		return reflect.New(typ).Elem()
 	}
 	d.err = errUnwantedElem
-	d.man.signalError(errUnwantedElem)
+	d.man.signalError(d.err)
 	return reflect.Value{}
 }
 
@@ -149,7 +163,7 @@ func (d *decoder) run() {
 			}
 		default:
 			d.err = errInvalidMsgType
-			d.man.signalError(errInvalidMsgType)
+			d.man.signalError(d.err)
 		}
 	}
 }

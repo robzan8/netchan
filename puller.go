@@ -46,21 +46,21 @@ func (p *puller) add(ch reflect.Value, id chanID) error {
 	return nil
 }
 
-func (p *puller) handleElem(elem element) error {
+func (p *puller) handleElem(elem element) {
 	info := p.chans[elem.ChID]
-	if !elem.Ok {
+	if !elem.Ok { // netchan closed normally
 		close(info.buf)
 		delete(p.chans, elem.ChID)
 		p.types.Lock()
 		delete(p.types.m, elem.ChID)
 		p.types.Unlock()
-		return nil
+		return
 	}
 	if len(info.buf) == cap(info.buf) {
-		return errWinExceeded
+		p.man.signalError(errWinExceeded)
+		return
 	}
 	info.buf <- elem.val
-	return nil
 }
 
 func bufferer(buf <-chan reflect.Value, ch reflect.Value, toEncoder chan<- winUpdate, id chanID) {
@@ -86,22 +86,17 @@ func (p *puller) run() {
 		select {
 		case req := <-p.addReqCh:
 			req.resp <- p.add(req.ch, req.id)
-		case elem, ok := <-p.elemCh:
-			if !ok { // decoder signaled an error
-				return p.handleError(p.man.Error())
-			}
-			err := p.handleElem(elem)
-			if err != nil {
-				return p.handleError(err)
-			}
-		}
-	}
-}
 
-func (p *puller) handleError(err) {
-	p.man.signalError(err)
-	// do we need to delete info from chan map?
-	for _, info := range p.chans {
-		close(info.buf)
+		case elem, ok := <-p.elemCh:
+			if !ok {
+				// error occurred and decoder shut down
+				for _, info := range p.chans {
+					close(info.buf)
+				}
+				close(p.toEncoder)
+				return
+			}
+			p.handleElem(elem)
+		}
 	}
 }

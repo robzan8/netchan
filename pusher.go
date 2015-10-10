@@ -24,17 +24,16 @@ const maxHalfOpen = 100
 const (
 	addReqCase int = iota
 	winupCase
-	errorCase
 	elemCase
 )
 
 func newPusher(toEncoder chan<- element, winupCh <-chan winUpdate, addReqCh <-chan addReq, man *Manager) *pusher {
+
 	p := &pusher{toEncoder: toEncoder, winupCh: winupCh, addReqCh: addReqCh, man: man}
 	p.chans = make(map[chanID]*pushInfo)
 	p.cases = make([]reflect.SelectCase, elemCase, elemCase*2)
 	p.cases[addReqCase] = reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(addReqCh)}
 	p.cases[winupCase] = reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(winupCh)}
-	p.cases[errorCase] = reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(man.gotErr)}
 	p.chIDs = make([]chanID, elemCase, elemCase*2)
 	return p
 }
@@ -42,29 +41,29 @@ func newPusher(toEncoder chan<- element, winupCh <-chan winUpdate, addReqCh <-ch
 func (p *pusher) add(ch reflect.Value, id chanID) error {
 	info, present := p.chans[id]
 	if present {
-		if info.ch == (reflect.Value{}) {
-			info.ch = ch
-			p.halfOpen--
-			return nil
+		if info.ch != (reflect.Value{}) {
+			return errAlreadyPushing
 		}
-		return errAlreadyPushing
+		info.ch = ch
+		p.halfOpen--
+		return nil
 	}
 	p.chans[id] = &pushInfo{ch: ch}
 	return nil
 }
 
-func (p *pusher) handleWinup(winup winUpdate) error {
+func (p *pusher) handleWinup(winup winUpdate) {
 	info, present := p.chans[winup.ChID]
 	if !present {
 		if p.halfOpen >= maxHalfOpen {
-			return errSynFlood
+			p.man.signalError(errSynFlood)
+			return
 		}
 		info = new(pushInfo)
 		p.chans[winup.ChID] = info
 		p.halfOpen++
 	}
 	info.win += winup.Incr
-	return nil
 }
 
 func (p *pusher) handleElem(id chanID, val reflect.Value, ok bool) {
@@ -93,15 +92,15 @@ func (p *pusher) run() {
 		case addReqCase:
 			req := val.Interface().(addReq)
 			req.resp <- p.add(req.ch, req.id)
+
 		case winupCase:
-			err := p.handleWinup(val.Interface().(winUpdate))
-			if err != nil {
-				p.man.signalError(err)
-				fallthrough
+			if !ok {
+				// error occurred and decoder shut down
+				close(p.toEncoder)
+				return
 			}
-		case errorCase:
-			close(p.toEncoder)
-			return
+			p.handleWinup(val.Interface().(winUpdate))
+
 		default:
 			p.handleElem(p.chIDs[i], val, ok)
 		}
