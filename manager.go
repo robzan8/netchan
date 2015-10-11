@@ -99,16 +99,15 @@ func (m *Manager) Pull(name string, channel interface{}) error {
 	}
 }
 
-func (m *Manager) signalError(err error) error {
+func (m *Manager) signalError(err error) {
 	m.errMu.Lock()
 	defer m.errMu.Unlock()
 	prevErr := m.Error()
 	if prevErr != nil { // someone signaled an error before us
-		return prevErr
+		return
 	}
 	m.err.Store(&err)
 	close(m.gotErr)
-	return err
 }
 
 func (m *Manager) Error() error {
