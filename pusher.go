@@ -60,17 +60,17 @@ func (p *pusher) add(ch reflect.Value, name hashedName) error {
 }
 
 func (p *pusher) handleWinup(winup winUpdate) {
-	info, present := p.chans[winup.ChName]
+	info, present := p.chans[winup.chName]
 	if !present {
 		if p.halfOpen >= maxHalfOpen {
 			p.man.signalError(errSynFlood)
 			return
 		}
 		info = new(pushInfo)
-		p.chans[winup.ChName] = info
+		p.chans[winup.chName] = info
 		p.halfOpen++
 	}
-	info.win += winup.Incr
+	info.win += winup.incr
 }
 
 func (p *pusher) handleElem(name hashedName, val reflect.Value, ok bool) {

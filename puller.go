@@ -48,12 +48,12 @@ func (p *puller) add(ch reflect.Value, name hashedName) error {
 }
 
 func (p *puller) handleElem(elem element) {
-	info := p.chans[elem.ChName]
-	if !elem.Ok { // netchan closed normally
+	info := p.chans[elem.chName]
+	if !elem.ok { // netchan closed normally
 		close(info.buf)
-		delete(p.chans, elem.ChName)
+		delete(p.chans, elem.chName)
 		p.types.Lock()
-		delete(p.types.m, elem.ChName)
+		delete(p.types.m, elem.chName)
 		p.types.Unlock()
 		return
 	}

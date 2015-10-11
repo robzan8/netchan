@@ -47,9 +47,9 @@ type encoder struct {
 }
 
 func newEncoder(elemCh <-chan element, windowCh <-chan winUpdate, man *Manager, conn io.Writer) *encoder {
-	e = &encoder{elemCh: elemCh, windowCh: windowCh, man: man}
+	e := &encoder{elemCh: elemCh, windowCh: windowCh, man: man}
 	e.cache = make(map[hashedName]int)
-	e.rand = rand.New(time.Now().UnixNano())
+	e.rand = rand.New(rand.NewSource(time.Now().UnixNano()))
 	e.enc = gob.NewEncoder(conn)
 	return e
 }
@@ -79,7 +79,7 @@ func (e *encoder) translateName(name hashedName) int {
 	if len(e.cache) < maxCacheLen {
 		// get a fresh id
 		id = len(e.cache)
-	} else if len(e.cache) == maxCacheLen {
+	} else {
 		// delete a random element from cache and take its id
 		randIndex := e.rand.Intn(maxCacheLen)
 		i := 0
@@ -92,8 +92,6 @@ func (e *encoder) translateName(name hashedName) int {
 			}
 			i++
 		}
-	} else {
-		panic("netchan encoder: maxCacheLen exceeded (bug!)")
 	}
 	e.cache[name] = id
 	e.encode(header{setIdMsg, id})

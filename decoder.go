@@ -8,27 +8,32 @@ import (
 
 var (
 	errUnwantedElem   = errors.New("netchan decoder: element received for channel not being pulled")
+	errInvalidId      = errors.New("netchan decoder: out of bounds channel id received")
 	errInvalidWinup   = errors.New("netchan decoder: window update received with non-positive value")
 	errInvalidMsgType = errors.New("netchan decoder: message received with invalid type")
 )
+
+type decError struct {
+	err error
+}
+
+func raiseError(err error) {
+	panic(decError{err})
+}
 
 type decoder struct {
 	toPuller chan<- element
 	toPusher chan<- winUpdate
 	man      *Manager
+	types    *typeMap
 	cache    []hashedName
 	dec      *gob.Decoder
-	err      error
-	types    *typeMap
 }
 
 func (d *decoder) decodeVal(v reflect.Value) {
-	if d.err != nil {
-		return
-	}
-	d.err = d.dec.DecodeValue(v)
-	if d.err != nil {
-		d.man.signalError(d.err)
+	err := d.dec.DecodeValue(v)
+	if err != nil {
+		raiseError(err)
 	}
 }
 
@@ -36,98 +41,79 @@ func (d *decoder) decode(v interface{}) {
 	d.decodeVal(reflect.ValueOf(v))
 }
 
-func (d *decoder) setId(id int, name hashedName) {
-	if d.err != nil {
-		return
-	}
-	if id == len(d.cache) {
-		d.cache = append(d.cache, name)
-		return
-	}
-	if 0 <= id && id < len(cache) {
-		d.cache[id] = name
-		return
-	}
-	d.err = errInvalidId
-	d.man.signalError(errInvalidId)
-}
-
 func (d *decoder) translateId(id int) hashedName {
-	if d.err != nil {
-		return hashedName{}
-	}
-	if 0 <= id && id < len(cache) {
+	if 0 <= id && id < len(d.cache) {
 		return d.cache[id]
 	}
-	d.err = errInvalidId
-	d.man.signalError(errInvalidId)
+	raiseError(errInvalidId)
+	return hashedName{}
 }
 
 func (d *decoder) run() {
-loop:
-	for d.man.Error() == nil {
+	defer d.shutDown()
+	for {
 		var h header
 		d.decode(&h)
-		if d.err != nil {
-			break loop
-		}
+
 		switch h.MsgType {
 		case elemMsg:
 			var elem element
 			elem.chName = d.translateId(h.ChId)
-			if d.err != nil {
-				break loop
-			}
 			d.types.Lock()
 			elemType, ok := d.types.m[elem.chName]
 			d.types.Unlock()
 			if !ok {
-				d.err = errUnwantedElem
-				break loop
+				raiseError(errUnwantedElem)
 			}
 			elem.val = reflect.New(elemType).Elem()
 			d.decodeVal(elem.val)
 			d.decode(&elem.ok)
-			if d.err != nil {
-				break loop
-			}
 			d.toPuller <- elem
 
 		case winupMsg:
 			var winup winUpdate
 			winup.chName = d.translateId(h.ChId)
 			d.decode(&winup.incr)
-			if d.err != nil {
-				break loop
-			}
 			if winup.incr <= 0 {
-				d.err = errInvalidWinup
-				break loop
+				raiseError(errInvalidWinup)
 			}
 			d.toPusher <- winup
 
 		case setIdMsg:
 			var name hashedName
 			d.decode(&name)
-			d.setId(h.ChId, name)
-			if d.err != nil {
-				break loop
+			if h.ChId == len(d.cache) {
+				d.cache = append(d.cache, name)
+			} else if 0 <= h.ChId && h.ChId < len(d.cache) {
+				d.cache[h.ChId] = name
+			} else {
+				raiseError(errInvalidId)
 			}
 
 		case errorMsg:
 			var errString string
 			d.decode(&errString)
-			if d.err == nil {
-				d.err = errors.New(errString)
-			}
-			break loop
+			raiseError(errors.New(errString))
 
 		default:
-			d.err = errInvalidMsgType
-			break loop
+			raiseError(errInvalidMsgType)
+		}
+
+		if err := d.man.Error(); err != nil {
+			raiseError(err)
 		}
 	}
-	d.man.signalError(err)
+}
+
+func (d *decoder) shutDown() {
+	// we are panicking,
+	// it's the only way the decoder can exit the run loop
+	e := recover()
+	decErr, ok := e.(decError)
+	if !ok {
+		panic(e)
+	}
+	d.man.signalError(decErr.err)
 	close(d.toPusher)
 	close(d.toPuller)
 }

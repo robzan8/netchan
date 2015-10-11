@@ -32,16 +32,15 @@ func Manage(conn io.ReadWriter) *Manager {
 	encWindowCh := make(chan winUpdate, chCap)
 	enc := newEncoder(encElemCh, encWindowCh, m, conn)
 
-	types := &typeMap{m: make(map[hashedName]reflect.Type)}
-
 	decElemCh := make(chan element, chCap)
 	decWindowCh := make(chan winUpdate, chCap)
+	types := &typeMap{m: make(map[hashedName]reflect.Type)}
 	dec := &decoder{
 		toPuller: decElemCh,
 		toPusher: decWindowCh,
 		man:      m,
-		dec:      gob.NewDecoder(conn),
 		types:    types,
+		dec:      gob.NewDecoder(conn),
 	}
 
 	push := newPusher(encElemCh, decWindowCh, pushAddCh, m)
