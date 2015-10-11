@@ -1,8 +1,14 @@
 package netchan
 
 import (
+	"errors"
 	"reflect"
 	"sync"
+)
+
+var (
+	errAlreadyPulling = errors.New("netchan puller: Manager.Pull called with channel name already present")
+	errWinExceeded    = errors.New("netchan puller: receive buffer limit not respected by peer")
 )
 
 type pullInfo struct {
@@ -22,11 +28,6 @@ type puller struct {
 
 	chans map[chanID]*pullInfo
 	types *typeMap
-}
-
-func newPuller(elemCh <-chan element, toEncoder chan<- winUpdate, addReqCh <-chan addReq, man *Manager, types *typeMap) *puller {
-	p := &puller{elemCh, toEncoder, addReqCh, man, make(map[chanID]*pullInfo), types}
-	return p
 }
 
 const bufCap = 512

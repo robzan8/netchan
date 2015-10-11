@@ -7,7 +7,7 @@ import (
 )
 
 var (
-	errUnwantedElem   = errors.New("netchan decoder: element arrived for channel not being pulled")
+	errUnwantedElem   = errors.New("netchan decoder: element received for channel not being pulled")
 	errInvalidWinup   = errors.New("netchan decoder: window update received with non-positive value")
 	errInvalidMsgType = errors.New("netchan decoder: message received with invalid type")
 )

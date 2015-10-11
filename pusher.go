@@ -1,6 +1,14 @@
 package netchan
 
-import "reflect"
+import (
+	"errors"
+	"reflect"
+)
+
+var (
+	errAlreadyPushing = errors.New("netchan pusher: Manager.Push called with channel name already present")
+	errSynFlood       = errors.New("netchan pusher: too many half open push requests")
+)
 
 type pushInfo struct {
 	ch  reflect.Value
@@ -28,7 +36,6 @@ const (
 )
 
 func newPusher(toEncoder chan<- element, winupCh <-chan winUpdate, addReqCh <-chan addReq, man *Manager) *pusher {
-
 	p := &pusher{toEncoder: toEncoder, winupCh: winupCh, addReqCh: addReqCh, man: man}
 	p.chans = make(map[chanID]*pushInfo)
 	p.cases = make([]reflect.SelectCase, elemCase, elemCase*2)
