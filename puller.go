@@ -17,7 +17,7 @@ type pullInfo struct {
 
 type typeMap struct {
 	sync.Mutex
-	m map[chanID]reflect.Type
+	m map[hashedName]reflect.Type
 }
 
 type puller struct {
@@ -26,34 +26,34 @@ type puller struct {
 	addReqCh  <-chan addReq // from Manager.Pull (user)
 	man       *Manager
 
-	chans map[chanID]*pullInfo
+	chans map[hashedName]*pullInfo
 	types *typeMap
 }
 
 const bufCap = 512
 
-func (p *puller) add(ch reflect.Value, id chanID) error {
-	_, present := p.chans[id]
+func (p *puller) add(ch reflect.Value, name hashedName) error {
+	_, present := p.chans[name]
 	if present {
 		return errAlreadyPulling
 	}
 	buf := make(chan reflect.Value, bufCap)
-	p.chans[id] = &pullInfo{buf}
+	p.chans[name] = &pullInfo{buf}
 	p.types.Lock()
-	p.types.m[id] = ch.Type().Elem()
+	p.types.m[name] = ch.Type().Elem()
 	p.types.Unlock()
 
-	go bufferer(buf, ch, p.toEncoder, id)
+	go bufferer(buf, ch, p.toEncoder, name)
 	return nil
 }
 
 func (p *puller) handleElem(elem element) {
-	info := p.chans[elem.ChID]
+	info := p.chans[elem.ChName]
 	if !elem.Ok { // netchan closed normally
 		close(info.buf)
-		delete(p.chans, elem.ChID)
+		delete(p.chans, elem.ChName)
 		p.types.Lock()
-		delete(p.types.m, elem.ChID)
+		delete(p.types.m, elem.ChName)
 		p.types.Unlock()
 		return
 	}
@@ -64,8 +64,8 @@ func (p *puller) handleElem(elem element) {
 	info.buf <- elem.val
 }
 
-func bufferer(buf <-chan reflect.Value, ch reflect.Value, toEncoder chan<- winUpdate, id chanID) {
-	toEncoder <- winUpdate{id, bufCap}
+func bufferer(buf <-chan reflect.Value, ch reflect.Value, toEncoder chan<- winUpdate, name hashedName) {
+	toEncoder <- winUpdate{name, bufCap}
 	sent := 0
 	for {
 		val, ok := <-buf
@@ -76,7 +76,7 @@ func bufferer(buf <-chan reflect.Value, ch reflect.Value, toEncoder chan<- winUp
 		ch.Send(val)
 		sent++
 		if sent*2 >= bufCap { // i.e. sent >= ceil(bufCap/2)
-			toEncoder <- winUpdate{id, sent}
+			toEncoder <- winUpdate{name, sent}
 			sent = 0
 		}
 	}
@@ -86,7 +86,7 @@ func (p *puller) run() {
 	for {
 		select {
 		case req := <-p.addReqCh:
-			req.resp <- p.add(req.ch, req.id)
+			req.resp <- p.add(req.ch, req.name)
 
 		case elem, ok := <-p.elemCh:
 			if !ok {

@@ -9,8 +9,8 @@ import (
 	"sync/atomic"
 )
 
-// a chan ID is the sha1 sum of its name
-type chanID [20]byte
+// sha1-hashed name of a net channel
+type hashedName [20]byte
 
 type Manager struct {
 	toPusher chan<- addReq
@@ -30,14 +30,9 @@ func Manage(conn io.ReadWriter) *Manager {
 
 	encElemCh := make(chan element, chCap)
 	encWindowCh := make(chan winUpdate, chCap)
-	enc := &encoder{
-		elemCh:   encElemCh,
-		windowCh: encWindowCh,
-		man:      m,
-		enc:      gob.NewEncoder(conn),
-	}
+	enc := newEncoder(encElemCh, encWindowCh, m, conn)
 
-	types := &typeMap{m: make(map[chanID]reflect.Type)}
+	types := &typeMap{m: make(map[hashedName]reflect.Type)}
 
 	decElemCh := make(chan element, chCap)
 	decWindowCh := make(chan winUpdate, chCap)
@@ -55,7 +50,7 @@ func Manage(conn io.ReadWriter) *Manager {
 		toEncoder: encWindowCh,
 		addReqCh:  pullAddCh,
 		man:       m,
-		chans:     make(map[chanID]*pullInfo),
+		chans:     make(map[hashedName]*pullInfo),
 		types:     types,
 	}
 
@@ -68,7 +63,7 @@ func Manage(conn io.ReadWriter) *Manager {
 
 type addReq struct { // request for adding (ch, name) to pusher or puller
 	ch   reflect.Value
-	id   chanID
+	name hashedName
 	resp chan error
 }
 

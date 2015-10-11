@@ -21,9 +21,9 @@ type pusher struct {
 	addReqCh  <-chan addReq
 	man       *Manager
 
-	chans    map[chanID]*pushInfo
+	chans    map[hashedName]*pushInfo
 	cases    []reflect.SelectCase
-	chIDs    []chanID
+	names    []hashedName
 	halfOpen int
 }
 
@@ -37,16 +37,16 @@ const (
 
 func newPusher(toEncoder chan<- element, winupCh <-chan winUpdate, addReqCh <-chan addReq, man *Manager) *pusher {
 	p := &pusher{toEncoder: toEncoder, winupCh: winupCh, addReqCh: addReqCh, man: man}
-	p.chans = make(map[chanID]*pushInfo)
+	p.chans = make(map[hashedName]*pushInfo)
 	p.cases = make([]reflect.SelectCase, elemCase, elemCase*2)
 	p.cases[addReqCase] = reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(addReqCh)}
 	p.cases[winupCase] = reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(winupCh)}
-	p.chIDs = make([]chanID, elemCase, elemCase*2)
+	p.names = make([]hashedName, elemCase, elemCase*2)
 	return p
 }
 
-func (p *pusher) add(ch reflect.Value, id chanID) error {
-	info, present := p.chans[id]
+func (p *pusher) add(ch reflect.Value, name hashedName) error {
+	info, present := p.chans[name]
 	if present {
 		if info.ch != (reflect.Value{}) {
 			return errAlreadyPushing
@@ -55,42 +55,42 @@ func (p *pusher) add(ch reflect.Value, id chanID) error {
 		p.halfOpen--
 		return nil
 	}
-	p.chans[id] = &pushInfo{ch: ch}
+	p.chans[name] = &pushInfo{ch: ch}
 	return nil
 }
 
 func (p *pusher) handleWinup(winup winUpdate) {
-	info, present := p.chans[winup.ChID]
+	info, present := p.chans[winup.ChName]
 	if !present {
 		if p.halfOpen >= maxHalfOpen {
 			p.man.signalError(errSynFlood)
 			return
 		}
 		info = new(pushInfo)
-		p.chans[winup.ChID] = info
+		p.chans[winup.ChName] = info
 		p.halfOpen++
 	}
 	info.win += winup.Incr
 }
 
-func (p *pusher) handleElem(id chanID, val reflect.Value, ok bool) {
-	p.toEncoder <- element{id, val, ok}
+func (p *pusher) handleElem(name hashedName, val reflect.Value, ok bool) {
+	p.toEncoder <- element{name, val, ok}
 	if !ok {
-		delete(p.chans, id)
+		delete(p.chans, name)
 		return
 	}
-	p.chans[id].win--
+	p.chans[name].win--
 }
 
 func (p *pusher) run() {
 	for {
 		// generate select cases from active chans
 		p.cases = p.cases[:elemCase]
-		p.chIDs = p.chIDs[:elemCase]
-		for id, info := range p.chans {
+		p.names = p.names[:elemCase]
+		for name, info := range p.chans {
 			if info.win > 0 {
 				p.cases = append(p.cases, reflect.SelectCase{Dir: reflect.SelectRecv, Chan: info.ch})
-				p.chIDs = append(p.chIDs, id)
+				p.names = append(p.names, name)
 			}
 		}
 
@@ -98,7 +98,7 @@ func (p *pusher) run() {
 		switch i {
 		case addReqCase:
 			req := val.Interface().(addReq)
-			req.resp <- p.add(req.ch, req.id)
+			req.resp <- p.add(req.ch, req.name)
 
 		case winupCase:
 			if !ok {
@@ -109,7 +109,7 @@ func (p *pusher) run() {
 			p.handleWinup(val.Interface().(winUpdate))
 
 		default:
-			p.handleElem(p.chIDs[i], val, ok)
+			p.handleElem(p.names[i], val, ok)
 		}
 	}
 }
