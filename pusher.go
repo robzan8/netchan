@@ -18,7 +18,8 @@ type pushInfo struct {
 type pusher struct {
 	toEncoder chan<- element
 	winupCh   <-chan winUpdate
-	addReqCh  <-chan addReq
+	pushReq   <-chan addReq
+	pushResp  chan<- error
 	man       *Manager
 
 	chans    map[hashedName]*pushInfo
@@ -30,16 +31,16 @@ type pusher struct {
 const maxHalfOpen = 100
 
 const (
-	addReqCase int = iota
+	pushReqCase int = iota
 	winupCase
 	elemCase
 )
 
-func newPusher(toEncoder chan<- element, winupCh <-chan winUpdate, addReqCh <-chan addReq, man *Manager) *pusher {
-	p := &pusher{toEncoder: toEncoder, winupCh: winupCh, addReqCh: addReqCh, man: man}
+func newPusher(toEncoder chan<- element, winupCh <-chan winUpdate, pushReq <-chan addReq, pushResp chan<- error, man *Manager) *pusher {
+	p := &pusher{toEncoder: toEncoder, winupCh: winupCh, pushReq: pushReq, pushResp: pushResp, man: man}
 	p.chans = make(map[hashedName]*pushInfo)
 	p.cases = make([]reflect.SelectCase, elemCase, elemCase*2)
-	p.cases[addReqCase] = reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(addReqCh)}
+	p.cases[pushReqCase] = reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(pushReq)}
 	p.cases[winupCase] = reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(winupCh)}
 	p.names = make([]hashedName, elemCase, elemCase*2)
 	return p
@@ -96,9 +97,9 @@ func (p *pusher) run() {
 
 		i, val, ok := reflect.Select(p.cases)
 		switch i {
-		case addReqCase:
+		case pushReqCase:
 			req := val.Interface().(addReq)
-			req.resp <- p.add(req.ch, req.name)
+			p.pushResp <- p.add(req.ch, req.name)
 
 		case winupCase:
 			if !ok {

@@ -23,7 +23,8 @@ type typeMap struct {
 type puller struct {
 	elemCh    <-chan element // from decoder
 	toEncoder chan<- winUpdate
-	addReqCh  <-chan addReq // from Manager.Pull (user)
+	pullReq   <-chan addReq // from Manager.Pull (user)
+	pullResp  chan<- error
 	man       *Manager
 
 	chans map[hashedName]*pullInfo
@@ -85,8 +86,8 @@ func bufferer(buf <-chan reflect.Value, ch reflect.Value, toEncoder chan<- winUp
 func (p *puller) run() {
 	for {
 		select {
-		case req := <-p.addReqCh:
-			req.resp <- p.add(req.ch, req.name)
+		case req := <-p.pullReq:
+			p.pullResp <- p.add(req.ch, req.name)
 
 		case elem, ok := <-p.elemCh:
 			if !ok {

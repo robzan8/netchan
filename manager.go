@@ -13,8 +13,10 @@ import (
 type hashedName [20]byte
 
 type Manager struct {
-	toPusher chan<- addReq
-	toPuller chan<- addReq
+	pushReq  chan<- addReq
+	pullReq  chan<- addReq
+	pushResp <-chan error
+	pullResp <-chan error
 	errMu    sync.Mutex
 	err      atomic.Value // *error
 	gotErr   chan struct{}
@@ -23,10 +25,13 @@ type Manager struct {
 func Manage(conn io.ReadWriter) *Manager {
 	const chCap int = 8
 
-	pushAddCh := make(chan addReq, chCap)
-	pullAddCh := make(chan addReq, chCap)
-	m := &Manager{toPusher: pushAddCh, toPuller: pullAddCh, gotErr: make(chan struct{})}
+	pushReq := make(chan addReq)
+	pullReq := make(chan addReq)
+	pushResp := make(chan error)
+	pullResp := make(chan error)
+	m := &Manager{pushReq: pushReq, pullReq: pullReq, pushResp: pushResp, pullResp: pullResp}
 	m.err.Store((*error)(nil))
+	m.gotErr = make(chan struct{})
 
 	encElemCh := make(chan element, chCap)
 	encWindowCh := make(chan winUpdate, chCap)
@@ -43,11 +48,12 @@ func Manage(conn io.ReadWriter) *Manager {
 		dec:      gob.NewDecoder(conn),
 	}
 
-	push := newPusher(encElemCh, decWindowCh, pushAddCh, m)
+	push := newPusher(encElemCh, decWindowCh, pushReq, pushResp, m)
 	pull := &puller{
 		elemCh:    decElemCh,
 		toEncoder: encWindowCh,
-		addReqCh:  pullAddCh,
+		pullReq:   pullReq,
+		pullResp:  pullResp,
 		man:       m,
 		chans:     make(map[hashedName]*pullInfo),
 		types:     types,
@@ -63,7 +69,6 @@ func Manage(conn io.ReadWriter) *Manager {
 type addReq struct { // request for adding (ch, name) to pusher or puller
 	ch   reflect.Value
 	name hashedName
-	resp chan error
 }
 
 func (m *Manager) Push(name string, channel interface{}) error {
@@ -71,10 +76,9 @@ func (m *Manager) Push(name string, channel interface{}) error {
 	if ch.Kind() != reflect.Chan || ch.Type().ChanDir()&reflect.RecvDir == 0 {
 		return nil // error: manager will not be able to receive from the channel
 	}
-	resp := make(chan error, 1) // avoid this by making chans sync
-	m.toPusher <- addReq{ch, sha1.Sum([]byte(name)), resp}
+	m.pushReq <- addReq{ch, sha1.Sum([]byte(name))}
 	select {
-	case err := <-resp:
+	case err := <-m.pushResp:
 		return err
 	case <-m.GotError():
 		return m.Error()
@@ -86,10 +90,9 @@ func (m *Manager) Pull(name string, channel interface{}) error {
 	if ch.Kind() != reflect.Chan || ch.Type().ChanDir()&reflect.SendDir == 0 {
 		return nil // error: manager will not be able to send to the channel
 	}
-	resp := make(chan error, 1)
-	m.toPuller <- addReq{ch, sha1.Sum([]byte(name)), resp}
+	m.pullReq <- addReq{ch, sha1.Sum([]byte(name))}
 	select {
-	case err := <-resp:
+	case err := <-m.pullResp:
 		return err
 	case <-m.GotError():
 		return m.Error()
