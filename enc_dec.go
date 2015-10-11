@@ -2,8 +2,14 @@ package netchan
 
 import (
 	"encoding/gob"
-	"log"
+	"errors"
 	"reflect"
+)
+
+var (
+	errUnwantedElem   = errors.New("netchan decoder: element received for channel not being pulled")
+	errInvalidWinup   = errors.New("netchan decoder: window update received with non-positive value")
+	errInvalidMsgType = errors.New("netchan decoder: message received with invalid type")
 )
 
 type msgType int
@@ -12,32 +18,24 @@ const (
 	_ msgType = iota
 	elemMsg
 	winupMsg
+	errorMsg
 )
 
 type element struct {
 	ChID chanID
-	val  reflect.Value // not exported, to be encoded/decoded separately
-	Ok   bool          // if not ok, the channel has been closed
+	val  reflect.Value
+	Ok   bool // if not ok, the channel has been closed
 }
 
 type winUpdate struct {
 	ChID chanID
-	Incr int // check not <= 0
-}
-
-func (t msgType) String() string {
-	switch t {
-	case elemMsg:
-		return "elemMsg"
-	case winupMsg:
-		return "winupMsg"
-	}
-	return "???"
+	Incr int
 }
 
 type encoder struct {
 	elemCh   <-chan element   // from pusher
 	windowCh <-chan winUpdate // from puller
+	man      *Manager
 	enc      *gob.Encoder
 	err      error
 }
@@ -47,6 +45,9 @@ func (e *encoder) encodeVal(v reflect.Value) {
 		return
 	}
 	e.err = e.enc.EncodeValue(v)
+	if e.err != nil {
+		e.man.signalError(e.err)
+	}
 }
 
 func (e *encoder) encode(v interface{}) {
@@ -54,81 +55,87 @@ func (e *encoder) encode(v interface{}) {
 }
 
 func (e *encoder) run() {
-	for {
+	for e.elemCh != nil || e.windowCh != nil {
 		select {
-		case elem := <-e.elemCh:
-			e.encode(elemMsg)
-			e.encode(elem)
-			e.encodeVal(elem.val)
+		case elem, ok := <-e.elemCh:
+			if ok {
+				e.encode(elemMsg)
+				e.encode(elem)
+				e.encodeVal(elem.val)
+			} else {
+				e.elemCh = nil
+			}
 
-		case winup := <-e.windowCh:
-			e.encode(winupMsg)
-			e.encode(winup)
-		}
-		if e.err != nil {
-			log.Fatal("netchan encoder: ", e.err)
+		case winup, ok := <-e.windowCh:
+			if ok {
+				e.encode(winupMsg)
+				e.encode(winup)
+			} else {
+				e.windowCh = nil
+			}
 		}
 	}
+	e.encode(errorMsg)
+	e.encode(e.man.Error().Error())
 }
 
 type decoder struct {
 	toPuller chan<- element
 	toPusher chan<- winUpdate
+	man      *Manager
 	dec      *gob.Decoder
 	err      error
-
-	types *typeMap
+	types    *typeMap
 }
 
-func (d *decoder) decodeVal(v reflect.Value) {
-	if d.err != nil {
-		return
-	}
-	d.err = d.dec.DecodeValue(v)
-}
-
-func (d *decoder) decode(v interface{}) {
-	d.decodeVal(reflect.ValueOf(v))
-}
-
-// TODO: detect when connection gets closed and shutdown everything
 func (d *decoder) run() {
-	for {
+	var err error
+loop:
+	for d.man.Error() == nil {
 		var typ msgType
-		d.decode(&typ)
-		if d.err != nil {
-			log.Fatal("netchan decoder: ", d.err)
+		err = d.dec.Decode(&typ)
+		if err != nil {
+			break loop
 		}
 		switch typ {
 		case elemMsg:
 			var elem element
-			d.decode(&elem)
-			if d.err != nil {
-				log.Fatal("netchan decoder: ", d.err)
+			err = d.dec.Decode(&elem)
+			if err != nil {
+				break loop
 			}
 			d.types.Lock()
 			elemType, ok := d.types.m[elem.ChID]
 			d.types.Unlock()
 			if !ok {
-				log.Fatal("netchan decoder: received element of unknown type")
+				err = errUnwantedElem
+				break loop
 			}
 			elem.val = reflect.New(elemType).Elem()
-			d.decodeVal(elem.val)
-			if d.err != nil {
-				log.Fatal("netchan decoder: ", d.err)
+			err = d.dec.DecodeValue(elem.val)
+			if err != nil {
+				break loop
 			}
 			d.toPuller <- elem
 
 		case winupMsg:
 			var winup winUpdate
-			d.decode(&winup)
-			if d.err != nil {
-				log.Fatal("netchan decoder: ", d.err)
+			err = d.dec.Decode(&winup)
+			if err != nil {
+				break loop
+			}
+			if winup.Incr <= 0 {
+				err = errInvalidWinup
+				break loop
 			}
 			d.toPusher <- winup
 
 		default:
-			log.Fatal("netchan decoder: invalid message type ", typ)
+			err = errInvalidMsgType
+			break loop
 		}
 	}
+	d.man.signalError(err)
+	close(d.toPusher)
+	close(d.toPuller)
 }

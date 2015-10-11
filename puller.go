@@ -1,9 +1,14 @@
 package netchan
 
 import (
-	"log"
+	"errors"
 	"reflect"
 	"sync"
+)
+
+var (
+	errAlreadyPulling = errors.New("netchan puller: Manager.Pull called with channel name already present")
+	errWinExceeded    = errors.New("netchan puller: receive buffer limit not respected by peer")
 )
 
 type pullInfo struct {
@@ -19,14 +24,10 @@ type puller struct {
 	elemCh    <-chan element // from decoder
 	toEncoder chan<- winUpdate
 	addReqCh  <-chan addReq // from Manager.Pull (user)
+	man       *Manager
 
 	chans map[chanID]*pullInfo
 	types *typeMap
-}
-
-func newPuller(elemCh <-chan element, toEncoder chan<- winUpdate, addReqCh <-chan addReq, types *typeMap) *puller {
-	p := &puller{elemCh, toEncoder, addReqCh, make(map[chanID]*pullInfo), types}
-	return p
 }
 
 const bufCap = 512
@@ -34,8 +35,7 @@ const bufCap = 512
 func (p *puller) add(ch reflect.Value, id chanID) error {
 	_, present := p.chans[id]
 	if present {
-		log.Fatal("netchan puller: adding channel already present")
-		return nil
+		return errAlreadyPulling
 	}
 	buf := make(chan reflect.Value, bufCap)
 	p.chans[id] = &pullInfo{buf}
@@ -49,18 +49,19 @@ func (p *puller) add(ch reflect.Value, id chanID) error {
 
 func (p *puller) handleElem(elem element) {
 	info := p.chans[elem.ChID]
-	if elem.Ok {
-		if len(info.buf) == cap(info.buf) {
-			log.Fatal("netchan puller: window size exceeded")
-		}
-		info.buf <- elem.val
-	} else {
+	if !elem.Ok { // netchan closed normally
 		close(info.buf)
 		delete(p.chans, elem.ChID)
 		p.types.Lock()
 		delete(p.types.m, elem.ChID)
 		p.types.Unlock()
+		return
 	}
+	if len(info.buf) == cap(info.buf) {
+		p.man.signalError(errWinExceeded)
+		return
+	}
+	info.buf <- elem.val
 }
 
 func bufferer(buf <-chan reflect.Value, ch reflect.Value, toEncoder chan<- winUpdate, id chanID) {
@@ -86,7 +87,16 @@ func (p *puller) run() {
 		select {
 		case req := <-p.addReqCh:
 			req.resp <- p.add(req.ch, req.id)
-		case elem := <-p.elemCh:
+
+		case elem, ok := <-p.elemCh:
+			if !ok {
+				// error occurred and decoder shut down
+				for _, info := range p.chans {
+					close(info.buf)
+				}
+				close(p.toEncoder)
+				return
+			}
 			p.handleElem(elem)
 		}
 	}

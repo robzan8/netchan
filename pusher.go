@@ -1,8 +1,13 @@
 package netchan
 
 import (
-	"log"
+	"errors"
 	"reflect"
+)
+
+var (
+	errAlreadyPushing = errors.New("netchan pusher: Manager.Push called with channel name already present")
+	errSynFlood       = errors.New("netchan pusher: too many half open push requests")
 )
 
 type pushInfo struct {
@@ -14,6 +19,7 @@ type pusher struct {
 	toEncoder chan<- element
 	winupCh   <-chan winUpdate
 	addReqCh  <-chan addReq
+	man       *Manager
 
 	chans    map[chanID]*pushInfo
 	cases    []reflect.SelectCase
@@ -21,7 +27,7 @@ type pusher struct {
 	halfOpen int
 }
 
-const maxHalfOpen int = 100
+const maxHalfOpen = 100
 
 const (
 	addReqCase int = iota
@@ -29,26 +35,24 @@ const (
 	elemCase
 )
 
-func newPusher(toEncoder chan<- element, winupCh <-chan winUpdate, addReqCh <-chan addReq) *pusher {
-	p := &pusher{toEncoder: toEncoder, winupCh: winupCh, addReqCh: addReqCh}
+func newPusher(toEncoder chan<- element, winupCh <-chan winUpdate, addReqCh <-chan addReq, man *Manager) *pusher {
+	p := &pusher{toEncoder: toEncoder, winupCh: winupCh, addReqCh: addReqCh, man: man}
 	p.chans = make(map[chanID]*pushInfo)
-	p.cases = make([]reflect.SelectCase, elemCase)
+	p.cases = make([]reflect.SelectCase, elemCase, elemCase*2)
 	p.cases[addReqCase] = reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(addReqCh)}
 	p.cases[winupCase] = reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(winupCh)}
-	p.chIDs = make([]chanID, elemCase)
-	p.halfOpen = 0
+	p.chIDs = make([]chanID, elemCase, elemCase*2)
 	return p
 }
 
 func (p *pusher) add(ch reflect.Value, id chanID) error {
 	info, present := p.chans[id]
 	if present {
-		if info.ch == (reflect.Value{}) {
-			info.ch = ch
-			p.halfOpen--
-			return nil
+		if info.ch != (reflect.Value{}) {
+			return errAlreadyPushing
 		}
-		log.Fatal("netchan pusher: adding channel already present")
+		info.ch = ch
+		p.halfOpen--
 		return nil
 	}
 	p.chans[id] = &pushInfo{ch: ch}
@@ -59,8 +63,7 @@ func (p *pusher) handleWinup(winup winUpdate) {
 	info, present := p.chans[winup.ChID]
 	if !present {
 		if p.halfOpen >= maxHalfOpen {
-			log.Fatal("netchan pusher: max number of half open netchans exceeded")
-			// send error somewhere maybe
+			p.man.signalError(errSynFlood)
 			return
 		}
 		info = new(pushInfo)
@@ -96,8 +99,15 @@ func (p *pusher) run() {
 		case addReqCase:
 			req := val.Interface().(addReq)
 			req.resp <- p.add(req.ch, req.id)
+
 		case winupCase:
+			if !ok {
+				// error occurred and decoder shut down
+				close(p.toEncoder)
+				return
+			}
 			p.handleWinup(val.Interface().(winUpdate))
+
 		default:
 			p.handleElem(p.chIDs[i], val, ok)
 		}
