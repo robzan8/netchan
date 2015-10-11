@@ -67,25 +67,25 @@ loop:
 				e.encode(elemMsg)
 				e.encode(elem)
 				e.encodeVal(elem.val)
-				continue loop
+			} else {
+				// error occurred and pusher shut down
+				if e.windowCh == nil {
+					break loop
+				}
+				e.elemCh = nil
 			}
-			// error occurred and pusher shut down
-			if e.windowCh == nil {
-				break loop
-			}
-			e.elemCh = nil
 
 		case winup, ok := <-e.windowCh:
 			if ok {
 				e.encode(winupMsg)
 				e.encode(winup)
-				continue loop
+			} else {
+				// error occurred and puller shut down
+				if e.elemCh == nil {
+					break loop
+				}
+				e.windowCh = nil
 			}
-			// error occurred and puller shut down
-			if e.elemCh == nil {
-				break loop
-			}
-			e.windowCh = nil
 		}
 	}
 	e.encode(errorMsg)
@@ -116,34 +116,42 @@ func (d *decoder) decode(v interface{}) {
 	d.decodeVal(reflect.ValueOf(v))
 }
 
-func (d *decoder) newElem(id chanID) reflect.Value {
+func (d *decoder) lookupType(id chanID) reflect.Type {
 	if d.err != nil {
-		return reflect.Value{}
+		return nil
 	}
 	d.types.Lock()
 	typ, ok := d.types.m[id]
 	d.types.Unlock()
 	if ok {
-		return reflect.New(typ).Elem()
+		return typ
 	}
 	d.err = errUnwantedElem
-	d.man.signalError(d.err)
-	return reflect.Value{}
+	d.man.signalError(errUnwantedElem)
+	return nil
+}
+
+func (d *decoder) reflectNew(typ reflect.Type) reflect.Value {
+	if d.err != nil {
+		return reflect.Value{}
+	}
+	return reflect.New(typ).Elem()
 }
 
 func (d *decoder) run() {
+loop:
 	for {
 		var typ msgType
 		d.decode(&typ)
 		if d.man.Error() != nil {
-			close(d.toPuller)
-			return
+			break loop
 		}
 		switch typ {
 		case elemMsg:
 			var elem element
 			d.decode(&elem)
-			elem.val = d.newElem(elem.ChID)
+			elemType := d.lookupType(elem.ChID)
+			elem.val = d.reflectNew(elemType)
 			d.decodeVal(elem.val)
 			if d.err == nil {
 				d.toPuller <- elem
@@ -166,4 +174,6 @@ func (d *decoder) run() {
 			d.man.signalError(d.err)
 		}
 	}
+	close(d.toPusher)
+	close(d.toPuller)
 }
