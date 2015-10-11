@@ -6,6 +6,12 @@ import (
 	"reflect"
 )
 
+var (
+	errUnwantedElem   = errors.New("netchan decoder: element arrived for channel not being pulled")
+	errInvalidWinup   = errors.New("netchan decoder: window update received with non-positive value")
+	errInvalidMsgType = errors.New("netchan decoder: message received with invalid type")
+)
+
 type msgType int
 
 const (
@@ -17,31 +23,21 @@ const (
 
 type element struct {
 	ChID chanID
-	val  reflect.Value // not exported, to be encoded/decoded separately
-	Ok   bool          // if not ok, the channel has been closed
+	val  reflect.Value
+	Ok   bool // if not ok, the channel has been closed
 }
 
 type winUpdate struct {
 	ChID chanID
-	Incr int // check not <= 0
-}
-
-func (t msgType) String() string {
-	switch t {
-	case elemMsg:
-		return "elemMsg"
-	case winupMsg:
-		return "winupMsg"
-	}
-	return "???"
+	Incr int
 }
 
 type encoder struct {
 	elemCh   <-chan element   // from pusher
 	windowCh <-chan winUpdate // from puller
+	man      *Manager
 	enc      *gob.Encoder
 	err      error
-	man      *Manager
 }
 
 func (e *encoder) encodeVal(v reflect.Value) {
@@ -59,8 +55,7 @@ func (e *encoder) encode(v interface{}) {
 }
 
 func (e *encoder) run() {
-loop:
-	for {
+	for e.elemCh != nil || e.windowCh != nil {
 		select {
 		case elem, ok := <-e.elemCh:
 			if ok {
@@ -68,10 +63,6 @@ loop:
 				e.encode(elem)
 				e.encodeVal(elem.val)
 			} else {
-				// error occurred and pusher shut down
-				if e.windowCh == nil {
-					break loop
-				}
 				e.elemCh = nil
 			}
 
@@ -80,100 +71,71 @@ loop:
 				e.encode(winupMsg)
 				e.encode(winup)
 			} else {
-				// error occurred and puller shut down
-				if e.elemCh == nil {
-					break loop
-				}
 				e.windowCh = nil
 			}
 		}
 	}
 	e.encode(errorMsg)
 	e.encode(e.man.Error().Error())
-	// hope peer gets the error
 }
 
 type decoder struct {
 	toPuller chan<- element
 	toPusher chan<- winUpdate
-	dec      *gob.Decoder
 	man      *Manager
-
-	types *typeMap
-}
-
-func (d *decoder) decodeVal(v reflect.Value) {
-	if d.err != nil {
-		return
-	}
-	d.err = d.dec.DecodeValue(v)
-	if d.err != nil {
-		d.man.signalError(d.err)
-	}
-}
-
-func (d *decoder) decode(v interface{}) {
-	d.decodeVal(reflect.ValueOf(v))
-}
-
-func (d *decoder) lookupType(id chanID) reflect.Type {
-	if d.err != nil {
-		return nil
-	}
-	d.types.Lock()
-	typ, ok := d.types.m[id]
-	d.types.Unlock()
-	if ok {
-		return typ
-	}
-	d.err = errUnwantedElem
-	d.man.signalError(errUnwantedElem)
-	return nil
-}
-
-func (d *decoder) reflectNew(typ reflect.Type) reflect.Value {
-	if d.err != nil {
-		return reflect.Value{}
-	}
-	return reflect.New(typ).Elem()
+	dec      *gob.Decoder
+	err      error
+	types    *typeMap
 }
 
 func (d *decoder) run() {
+	var err error
 loop:
-	for {
+	for d.man.Error() == nil {
 		var typ msgType
-		d.decode(&typ)
-		if d.man.Error() != nil {
+		err = d.dec.Decode(&typ)
+		if err != nil {
 			break loop
 		}
 		switch typ {
 		case elemMsg:
 			var elem element
-			d.decode(&elem)
-			elemType := d.lookupType(elem.ChID)
-			elem.val = d.reflectNew(elemType)
-			d.decodeVal(elem.val)
-			if d.err == nil {
-				d.toPuller <- elem
+			err = d.dec.Decode(&elem)
+			if err != nil {
+				break loop
 			}
+			d.types.Lock()
+			elemType, ok := d.types.m[elem.ChID]
+			d.types.Unlock()
+			if !ok {
+				err = errUnwantedElem
+				break loop
+			}
+			elem.val = reflect.New(elemType).Elem()
+			err = d.dec.DecodeValue(elem.val)
+			if err != nil {
+				break loop
+			}
+			d.toPuller <- elem
+
 		case winupMsg:
 			var winup winUpdate
-			d.decode(&winup)
-			if d.err == nil {
-				d.toPusher <- winup
+			err = d.dec.Decode(&winup)
+			if err != nil {
+				break loop
 			}
-		case errorMsg:
-			var errString string
-			d.decode(&errString)
-			if d.err == nil {
-				d.err = errors.New(errString)
-				d.man.signalError(d.err)
+			if winup.Incr <= 0 {
+				err = errInvalidWinup
+				break loop
 			}
+			d.toPusher <- winup
+
 		default:
-			d.err = errInvalidMsgType
-			d.man.signalError(d.err)
+			err = errInvalidMsgType
+			break loop
 		}
 	}
+	d.man.signalError(err)
 	close(d.toPusher)
 	close(d.toPuller)
 }
