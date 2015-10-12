@@ -44,7 +44,7 @@ func (l *LimGobReader) Read(buf []byte) (n int, err error) {
 		return
 	}
 	if l.next == 0 {
-		n, err = l.readAtCounter(buf)
+		n, err = l.readMsgLen(buf)
 		if err != nil {
 			return
 		}
@@ -63,7 +63,7 @@ func (l *LimGobReader) Read(buf []byte) (n int, err error) {
 
 // reached the length of a new message,
 // parse it like decodeUintReader in gob/decode.go
-func (l *LimGobReader) readAtCounter(buf []byte) (n int, err error) {
+func (l *LimGobReader) readMsgLen(buf []byte) (n int, err error) {
 	p, err := l.r.Peek(1)
 	if err != nil {
 		return

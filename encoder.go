@@ -25,17 +25,6 @@ type header struct {
 	ChId    int
 }
 
-type element struct {
-	chName hashedName
-	val    reflect.Value
-	ok     bool // if not ok, the channel has been closed
-}
-
-type winUpdate struct {
-	chName hashedName
-	incr   int
-}
-
 type encoder struct {
 	elemCh   <-chan element   // from pusher
 	windowCh <-chan winUpdate // from puller
@@ -81,7 +70,7 @@ func (e *encoder) translateName(name hashedName) int {
 		id = len(e.cache)
 	} else {
 		// delete a random element from cache and take its id
-		randIndex := e.rand.Intn(maxCacheLen)
+		randIndex := e.rand.Intn(len(e.cache))
 		i := 0
 		var victim hashedName
 		for victim, id = range e.cache {

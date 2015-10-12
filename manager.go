@@ -12,6 +12,17 @@ import (
 // sha1-hashed name of a net channel
 type hashedName [20]byte
 
+type element struct {
+	chName hashedName
+	val    reflect.Value
+	ok     bool // if not ok, the channel has been closed
+}
+
+type winUpdate struct {
+	chName hashedName
+	incr   int
+}
+
 type Manager struct {
 	pushReq  chan<- addReq
 	pullReq  chan<- addReq

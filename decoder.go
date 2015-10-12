@@ -7,10 +7,11 @@ import (
 )
 
 var (
-	errUnwantedElem   = errors.New("netchan decoder: element received for channel not being pulled")
-	errInvalidId      = errors.New("netchan decoder: out of bounds channel id received")
-	errInvalidWinup   = errors.New("netchan decoder: window update received with non-positive value")
-	errInvalidMsgType = errors.New("netchan decoder: message received with invalid type")
+	errCacheLimitExceeded = errors.New("netchan decoder: maxCacheLen exceeded")
+	errUnwantedElem       = errors.New("netchan decoder: element received for channel not being pulled")
+	errInvalidId          = errors.New("netchan decoder: out of bounds channel id received")
+	errInvalidWinup       = errors.New("netchan decoder: window update received with non-positive value")
+	errInvalidMsgType     = errors.New("netchan decoder: message received with invalid type")
 )
 
 type decError struct {
