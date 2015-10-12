@@ -82,11 +82,14 @@ func (d *decoder) run() {
 		case setIdMsg:
 			var name hashedName
 			d.decode(&name)
-			if h.ChId == len(d.cache) {
+			switch {
+			case h.ChId == len(d.cache) && len(d.cache) < maxCacheLen:
 				d.cache = append(d.cache, name)
-			} else if 0 <= h.ChId && h.ChId < len(d.cache) {
+			case 0 <= h.ChId && h.ChId < len(d.cache):
 				d.cache[h.ChId] = name
-			} else {
+			case h.ChId == len(d.cache) && len(d.cache) >= maxCacheLen:
+				raiseError(errCacheLimitExceeded)
+			default:
 				raiseError(errInvalidId)
 			}
 
