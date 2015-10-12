@@ -4,8 +4,8 @@ import "io"
 
 // simulate full duplex connection
 type connection struct {
-	readA, readB   io.Reader
-	writeA, writeB io.Writer
+	readA, readB   *io.PipeReader
+	writeA, writeB *io.PipeWriter
 }
 
 func newConn() *connection {
@@ -13,6 +13,11 @@ func newConn() *connection {
 	c.readA, c.writeB = io.Pipe()
 	c.readB, c.writeA = io.Pipe()
 	return c
+}
+
+func (c *connection) Close() {
+	c.writeA.Close()
+	c.writeB.Close()
 }
 
 type side struct {
