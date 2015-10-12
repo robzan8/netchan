@@ -18,7 +18,7 @@ func TestPushThenPull(t *testing.T) {
 	go func() { // producer
 		man1 := Manage(sideA(conn))
 		ch1 := make(chan int, smallBuf)
-		man1.Push("netchan test", ch1)
+		man1.Push(ch1, "netchan test")
 		for i := 0; i < n; i++ {
 			ch1 <- i
 		}
@@ -29,7 +29,7 @@ func TestPushThenPull(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 		man2 := Manage(sideB(conn))
 		ch2 := make(chan int, smallBuf)
-		man2.Pull("netchan test", ch2)
+		man2.Pull(ch2, "netchan test")
 		for i := range ch2 {
 			s[i] = i
 		}
@@ -56,7 +56,7 @@ func TestPullThenPush(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 		man1 := Manage(sideA(conn))
 		ch1 := make(chan int, smallBuf)
-		man1.Push("netchan test", ch1)
+		man1.Push(ch1, "netchan test")
 		for i := 0; i < n; i++ {
 			ch1 <- i
 		}
@@ -66,7 +66,7 @@ func TestPullThenPush(t *testing.T) {
 	go func() { // consumer
 		man2 := Manage(sideB(conn))
 		ch2 := make(chan int, smallBuf)
-		man2.Pull("netchan test", ch2)
+		man2.Pull(ch2, "netchan test")
 		for i := range ch2 {
 			s[i] = i
 		}
@@ -95,7 +95,7 @@ func TestManyChans(t *testing.T) {
 
 	go func() { // producer1
 		ch1 := make(chan int, smallBuf)
-		manA.Push("netchan test1", ch1)
+		manA.Push(ch1, "netchan test1")
 		for i := 0; i < n; i++ {
 			ch1 <- i
 		}
@@ -103,7 +103,7 @@ func TestManyChans(t *testing.T) {
 	}()
 	go func() { // consumer1
 		ch2 := make(chan int, smallBuf)
-		manB.Pull("netchan test1", ch2)
+		manB.Pull(ch2, "netchan test1")
 		for i := range ch2 {
 			s[0] = append(s[0], i)
 		}
@@ -112,7 +112,7 @@ func TestManyChans(t *testing.T) {
 
 	go func() { // producer2
 		ch1 := make(chan int, smallBuf)
-		manB.Push("netchan test2", ch1)
+		manB.Push(ch1, "netchan test2")
 		for i := 0; i < n; i++ {
 			ch1 <- i
 		}
@@ -120,7 +120,7 @@ func TestManyChans(t *testing.T) {
 	}()
 	go func() { // consumer2
 		ch2 := make(chan int, smallBuf)
-		manA.Pull("netchan test2", ch2)
+		manA.Pull(ch2, "netchan test2")
 		for i := range ch2 {
 			s[1] = append(s[1], i)
 		}
@@ -129,7 +129,7 @@ func TestManyChans(t *testing.T) {
 
 	go func() { // producer3
 		ch1 := make(chan int, smallBuf)
-		manA.Push("netchan test3", ch1)
+		manA.Push(ch1, "netchan test3")
 		for i := 0; i < n; i++ {
 			ch1 <- i
 		}
@@ -137,7 +137,7 @@ func TestManyChans(t *testing.T) {
 	}()
 	go func() { // consumer3
 		ch2 := make(chan int, smallBuf)
-		manB.Pull("netchan test3", ch2)
+		manB.Pull(ch2, "netchan test3")
 		for i := range ch2 {
 			s[2] = append(s[2], i)
 		}

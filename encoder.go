@@ -8,36 +8,37 @@ import (
 	"time"
 )
 
-const maxCacheLen = 100
+const idCacheCap = 257
 
 type msgType int
 
 const (
 	_ msgType = iota
 	elemMsg
-	winupMsg
+	creditMsg
 	setIdMsg
 	errorMsg
 )
 
 type header struct {
 	MsgType msgType
-	ChId    int
+	ChanId  int
 }
 
 type encoder struct {
-	elemCh   <-chan element   // from pusher
-	windowCh <-chan winUpdate // from puller
+	elemCh   <-chan element // from pusher
+	creditCh <-chan credit  // from puller
 	man      *Manager
-	cache    map[hashedName]int
-	rand     *rand.Rand
-	enc      *gob.Encoder
-	err      error
+
+	idCache map[hashedName]int
+	rand    *rand.Rand
+	enc     *gob.Encoder
+	err     error
 }
 
-func newEncoder(elemCh <-chan element, windowCh <-chan winUpdate, man *Manager, conn io.Writer) *encoder {
-	e := &encoder{elemCh: elemCh, windowCh: windowCh, man: man}
-	e.cache = make(map[hashedName]int)
+func newEncoder(elemCh <-chan element, creditCh <-chan credit, man *Manager, conn io.Writer) *encoder {
+	e := &encoder{elemCh: elemCh, creditCh: creditCh, man: man}
+	e.idCache = make(map[hashedName]int)
 	e.rand = rand.New(rand.NewSource(time.Now().UnixNano()))
 	e.enc = gob.NewEncoder(conn)
 	return e
@@ -61,35 +62,35 @@ func (e *encoder) translateName(name hashedName) int {
 	if e.err != nil {
 		return -1
 	}
-	id, present := e.cache[name]
+	id, present := e.idCache[name]
 	if present {
 		return id
 	}
-	if len(e.cache) < maxCacheLen {
+	if len(e.idCache) < idCacheCap {
 		// get a fresh id
-		id = len(e.cache)
+		id = len(e.idCache)
 	} else {
-		// delete a random element from cache and take its id
-		randIndex := e.rand.Intn(len(e.cache))
+		// delete a random element from idCache and take its id
+		randIndex := e.rand.Intn(len(e.idCache))
 		i := 0
 		var victim hashedName
-		for victim, id = range e.cache {
+		for victim, id = range e.idCache {
 			if i == randIndex {
-				delete(e.cache, victim)
+				delete(e.idCache, victim)
 				// id is set
 				break
 			}
 			i++
 		}
 	}
-	e.cache[name] = id
+	e.idCache[name] = id
 	e.encode(header{setIdMsg, id})
 	e.encode(name)
 	return id
 }
 
 func (e *encoder) run() {
-	for e.elemCh != nil || e.windowCh != nil {
+	for e.elemCh != nil || e.creditCh != nil {
 		select {
 		case elem, ok := <-e.elemCh:
 			if ok {
@@ -101,13 +102,13 @@ func (e *encoder) run() {
 				e.elemCh = nil
 			}
 
-		case winup, ok := <-e.windowCh:
+		case cred, ok := <-e.creditCh:
 			if ok {
-				id := e.translateName(winup.chName)
-				e.encode(header{winupMsg, id})
-				e.encode(winup.incr)
+				id := e.translateName(cred.chName)
+				e.encode(header{creditMsg, id})
+				e.encode(cred.incr)
 			} else {
-				e.windowCh = nil
+				e.creditCh = nil
 			}
 		}
 	}

@@ -8,7 +8,7 @@ import (
 
 var (
 	errAlreadyPulling = errors.New("netchan puller: Manager.Pull called with channel name already present")
-	errWinExceeded    = errors.New("netchan puller: receive buffer limit not respected by peer")
+	errCredExceeded   = errors.New("netchan puller: peer sent more elements than its credit allowed")
 )
 
 type pullInfo struct {
@@ -22,7 +22,7 @@ type typeMap struct {
 
 type puller struct {
 	elemCh    <-chan element // from decoder
-	toEncoder chan<- winUpdate
+	toEncoder chan<- credit
 	pullReq   <-chan addReq // from Manager.Pull (user)
 	pullResp  chan<- error
 	man       *Manager
@@ -44,7 +44,7 @@ func (p *puller) add(ch reflect.Value, name hashedName) error {
 	p.types.m[name] = ch.Type().Elem()
 	p.types.Unlock()
 
-	go bufferer(buf, ch, p.toEncoder, name)
+	go bufferer(buf, ch, name, p.toEncoder)
 	return nil
 }
 
@@ -59,14 +59,14 @@ func (p *puller) handleElem(elem element) {
 		return
 	}
 	if len(info.buf) == cap(info.buf) {
-		p.man.signalError(errWinExceeded)
+		p.man.signalError(errCredExceeded)
 		return
 	}
 	info.buf <- elem.val
 }
 
-func bufferer(buf <-chan reflect.Value, ch reflect.Value, toEncoder chan<- winUpdate, name hashedName) {
-	toEncoder <- winUpdate{name, bufCap}
+func bufferer(buf <-chan reflect.Value, ch reflect.Value, name hashedName, toEncoder chan<- credit) {
+	toEncoder <- credit{name, bufCap}
 	sent := 0
 	for {
 		val, ok := <-buf
@@ -77,7 +77,7 @@ func bufferer(buf <-chan reflect.Value, ch reflect.Value, toEncoder chan<- winUp
 		ch.Send(val)
 		sent++
 		if sent*2 >= bufCap { // i.e. sent >= ceil(bufCap/2)
-			toEncoder <- winUpdate{name, sent}
+			toEncoder <- credit{name, sent}
 			sent = 0
 		}
 	}

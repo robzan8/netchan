@@ -3,10 +3,16 @@ package netchan
 import (
 	"crypto/sha1"
 	"encoding/gob"
+	"errors"
 	"io"
 	"reflect"
 	"sync"
 	"sync/atomic"
+)
+
+var (
+	errBadPushChan = errors.New("netchan Manager: Push called with bad channel argument")
+	errBadPullChan = errors.New("netchan Manager: Pull called with bad channel argument")
 )
 
 // sha1-hashed name of a net channel
@@ -18,7 +24,7 @@ type element struct {
 	ok     bool // if not ok, the channel has been closed
 }
 
-type winUpdate struct {
+type credit struct {
 	chName hashedName
 	incr   int
 }
@@ -28,9 +34,10 @@ type Manager struct {
 	pullReq  chan<- addReq
 	pushResp <-chan error
 	pullResp <-chan error
-	errMu    sync.Mutex
-	err      atomic.Value // *error
-	gotErr   chan struct{}
+
+	errMu  sync.Mutex
+	err    atomic.Value // *error
+	gotErr chan struct{}
 }
 
 func Manage(conn io.ReadWriter) *Manager {
@@ -45,24 +52,24 @@ func Manage(conn io.ReadWriter) *Manager {
 	m.gotErr = make(chan struct{})
 
 	encElemCh := make(chan element, chCap)
-	encWindowCh := make(chan winUpdate, chCap)
-	enc := newEncoder(encElemCh, encWindowCh, m, conn)
+	encCredCh := make(chan credit, chCap)
+	enc := newEncoder(encElemCh, encCredCh, m, conn)
 
 	decElemCh := make(chan element, chCap)
-	decWindowCh := make(chan winUpdate, chCap)
+	decCredCh := make(chan credit, chCap)
 	types := &typeMap{m: make(map[hashedName]reflect.Type)}
 	dec := &decoder{
 		toPuller: decElemCh,
-		toPusher: decWindowCh,
+		toPusher: decCredCh,
 		man:      m,
 		types:    types,
 		dec:      gob.NewDecoder(conn),
 	}
 
-	push := newPusher(encElemCh, decWindowCh, pushReq, pushResp, m)
+	push := newPusher(encElemCh, decCredCh, pushReq, pushResp, m)
 	pull := &puller{
 		elemCh:    decElemCh,
-		toEncoder: encWindowCh,
+		toEncoder: encCredCh,
 		pullReq:   pullReq,
 		pullResp:  pullResp,
 		man:       m,
@@ -82,10 +89,11 @@ type addReq struct { // request for adding (ch, name) to pusher or puller
 	name hashedName
 }
 
-func (m *Manager) Push(name string, channel interface{}) error {
+func (m *Manager) Push(channel interface{}, name string) error {
 	ch := reflect.ValueOf(channel)
 	if ch.Kind() != reflect.Chan || ch.Type().ChanDir()&reflect.RecvDir == 0 {
-		return nil // error: manager will not be able to receive from the channel
+		// pusher will not be able to receive from channel
+		panic(errBadPushChan)
 	}
 	m.pushReq <- addReq{ch, sha1.Sum([]byte(name))}
 	select {
@@ -96,10 +104,11 @@ func (m *Manager) Push(name string, channel interface{}) error {
 	}
 }
 
-func (m *Manager) Pull(name string, channel interface{}) error {
+func (m *Manager) Pull(channel interface{}, name string) error {
 	ch := reflect.ValueOf(channel)
 	if ch.Kind() != reflect.Chan || ch.Type().ChanDir()&reflect.SendDir == 0 {
-		return nil // error: manager will not be able to send to the channel
+		// puller will not be able to send to channel
+		panic(errBadPullChan)
 	}
 	m.pullReq <- addReq{ch, sha1.Sum([]byte(name))}
 	select {

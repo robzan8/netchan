@@ -7,11 +7,11 @@ import (
 )
 
 var (
-	errCacheLimitExceeded = errors.New("netchan decoder: maxCacheLen exceeded")
-	errUnwantedElem       = errors.New("netchan decoder: element received for channel not being pulled")
-	errInvalidId          = errors.New("netchan decoder: out of bounds channel id received")
-	errInvalidWinup       = errors.New("netchan decoder: window update received with non-positive value")
-	errInvalidMsgType     = errors.New("netchan decoder: message received with invalid type")
+	errCacheCapExceeded = errors.New("netchan decoder: idCacheCap exceeded")
+	errInvalidId        = errors.New("netchan decoder: out of bounds id received")
+	errInvalidMsgType   = errors.New("netchan decoder: message with invalid type received")
+	errInvalidCred      = errors.New("netchan decoder: credit with non-positive value received")
+	errUnwantedElem     = errors.New("netchan decoder: element received for channel not being pulled")
 )
 
 type decError struct {
@@ -24,11 +24,12 @@ func raiseError(err error) {
 
 type decoder struct {
 	toPuller chan<- element
-	toPusher chan<- winUpdate
+	toPusher chan<- credit
 	man      *Manager
-	types    *typeMap
-	cache    []hashedName
-	dec      *gob.Decoder
+
+	types   *typeMap
+	idCache []hashedName
+	dec     *gob.Decoder
 }
 
 func (d *decoder) decodeVal(v reflect.Value) {
@@ -43,8 +44,8 @@ func (d *decoder) decode(v interface{}) {
 }
 
 func (d *decoder) translateId(id int) hashedName {
-	if 0 <= id && id < len(d.cache) {
-		return d.cache[id]
+	if 0 <= id && id < len(d.idCache) {
+		return d.idCache[id]
 	}
 	raiseError(errInvalidId)
 	return hashedName{}
@@ -59,7 +60,7 @@ func (d *decoder) run() {
 		switch h.MsgType {
 		case elemMsg:
 			var elem element
-			elem.chName = d.translateId(h.ChId)
+			elem.chName = d.translateId(h.ChanId)
 			d.types.Lock()
 			elemType, ok := d.types.m[elem.chName]
 			d.types.Unlock()
@@ -71,25 +72,25 @@ func (d *decoder) run() {
 			d.decode(&elem.ok)
 			d.toPuller <- elem
 
-		case winupMsg:
-			var winup winUpdate
-			winup.chName = d.translateId(h.ChId)
-			d.decode(&winup.incr)
-			if winup.incr <= 0 {
-				raiseError(errInvalidWinup)
+		case creditMsg:
+			var cred credit
+			cred.chName = d.translateId(h.ChanId)
+			d.decode(&cred.incr)
+			if cred.incr <= 0 {
+				raiseError(errInvalidCred)
 			}
-			d.toPusher <- winup
+			d.toPusher <- cred
 
 		case setIdMsg:
 			var name hashedName
 			d.decode(&name)
 			switch {
-			case h.ChId == len(d.cache) && len(d.cache) < maxCacheLen:
-				d.cache = append(d.cache, name)
-			case 0 <= h.ChId && h.ChId < len(d.cache):
-				d.cache[h.ChId] = name
-			case h.ChId == len(d.cache) && len(d.cache) >= maxCacheLen:
-				raiseError(errCacheLimitExceeded)
+			case h.ChanId == len(d.idCache) && len(d.idCache) < idCacheCap:
+				d.idCache = append(d.idCache, name)
+			case 0 <= h.ChanId && h.ChanId < len(d.idCache):
+				d.idCache[h.ChanId] = name
+			case h.ChanId == len(d.idCache) && len(d.idCache) >= idCacheCap:
+				raiseError(errCacheCapExceeded)
 			default:
 				raiseError(errInvalidId)
 			}

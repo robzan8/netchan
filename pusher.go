@@ -11,13 +11,13 @@ var (
 )
 
 type pushInfo struct {
-	ch  reflect.Value
-	win int
+	ch     reflect.Value
+	credit int
 }
 
 type pusher struct {
 	toEncoder chan<- element
-	winupCh   <-chan winUpdate
+	creditCh  <-chan credit // from decoder
 	pushReq   <-chan addReq
 	pushResp  chan<- error
 	man       *Manager
@@ -28,20 +28,20 @@ type pusher struct {
 	halfOpen int
 }
 
-const maxHalfOpen = 100
+const maxHalfOpen = 256
 
 const (
 	pushReqCase int = iota
-	winupCase
+	creditCase
 	elemCase
 )
 
-func newPusher(toEncoder chan<- element, winupCh <-chan winUpdate, pushReq <-chan addReq, pushResp chan<- error, man *Manager) *pusher {
-	p := &pusher{toEncoder: toEncoder, winupCh: winupCh, pushReq: pushReq, pushResp: pushResp, man: man}
+func newPusher(toEncoder chan<- element, creditCh <-chan credit, pushReq <-chan addReq, pushResp chan<- error, man *Manager) *pusher {
+	p := &pusher{toEncoder: toEncoder, creditCh: creditCh, pushReq: pushReq, pushResp: pushResp, man: man}
 	p.chans = make(map[hashedName]*pushInfo)
 	p.cases = make([]reflect.SelectCase, elemCase, elemCase*2)
 	p.cases[pushReqCase] = reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(pushReq)}
-	p.cases[winupCase] = reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(winupCh)}
+	p.cases[creditCase] = reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(creditCh)}
 	p.names = make([]hashedName, elemCase, elemCase*2)
 	return p
 }
@@ -60,18 +60,18 @@ func (p *pusher) add(ch reflect.Value, name hashedName) error {
 	return nil
 }
 
-func (p *pusher) handleWinup(winup winUpdate) {
-	info, present := p.chans[winup.chName]
+func (p *pusher) handleCredit(cred credit) {
+	info, present := p.chans[cred.chName]
 	if !present {
 		if p.halfOpen >= maxHalfOpen {
 			p.man.signalError(errSynFlood)
 			return
 		}
 		info = new(pushInfo)
-		p.chans[winup.chName] = info
+		p.chans[cred.chName] = info
 		p.halfOpen++
 	}
-	info.win += winup.incr
+	info.credit += cred.incr
 }
 
 func (p *pusher) handleElem(name hashedName, val reflect.Value, ok bool) {
@@ -80,7 +80,7 @@ func (p *pusher) handleElem(name hashedName, val reflect.Value, ok bool) {
 		delete(p.chans, name)
 		return
 	}
-	p.chans[name].win--
+	p.chans[name].credit--
 }
 
 func (p *pusher) run() {
@@ -89,7 +89,7 @@ func (p *pusher) run() {
 		p.cases = p.cases[:elemCase]
 		p.names = p.names[:elemCase]
 		for name, info := range p.chans {
-			if info.win > 0 {
+			if info.credit > 0 {
 				p.cases = append(p.cases, reflect.SelectCase{Dir: reflect.SelectRecv, Chan: info.ch})
 				p.names = append(p.names, name)
 			}
@@ -101,15 +101,15 @@ func (p *pusher) run() {
 			req := val.Interface().(addReq)
 			p.pushResp <- p.add(req.ch, req.name)
 
-		case winupCase:
+		case creditCase:
 			if !ok {
 				// error occurred and decoder shut down
 				close(p.toEncoder)
 				return
 			}
-			p.handleWinup(val.Interface().(winUpdate))
+			p.handleCredit(val.Interface().(credit))
 
-		default:
+		default: // i >= elemCase
 			p.handleElem(p.names[i], val, ok)
 		}
 	}
