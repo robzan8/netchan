@@ -81,24 +81,26 @@ func (p *pusher) handleElem(name hashedName, val reflect.Value, ok bool) {
 	p.chans[name] = info
 }
 
+func (p *pusher) bigSelect() (int, reflect.Value, bool) {
+	// generate select cases from active chans
+	p.cases = p.cases[:elemCase]
+	p.names = p.names[:elemCase]
+	for name, info := range p.chans {
+		if info.credit > 0 {
+			p.cases = append(p.cases, reflect.SelectCase{Dir: reflect.SelectRecv, Chan: info.ch})
+			p.names = append(p.names, name)
+		}
+	}
+	return reflect.Select(p.cases)
+}
+
 func (p *pusher) run() {
 	for {
-		// generate select cases from active chans
-		p.cases = p.cases[:elemCase]
-		p.names = p.names[:elemCase]
-		for name, info := range p.chans {
-			if info.credit > 0 {
-				p.cases = append(p.cases, reflect.SelectCase{Dir: reflect.SelectRecv, Chan: info.ch})
-				p.names = append(p.names, name)
-			}
-		}
-
-		i, val, ok := reflect.Select(p.cases)
+		i, val, ok := p.bigSelect()
 		switch i {
 		case pushReqCase:
 			req := val.Interface().(addReq)
 			p.pushResp <- p.add(req.ch, req.name)
-
 		case creditCase:
 			if !ok {
 				// error occurred and decoder shut down
@@ -106,7 +108,6 @@ func (p *pusher) run() {
 				return
 			}
 			p.handleCredit(val.Interface().(credit))
-
 		default: // i >= elemCase
 			p.handleElem(p.names[i], val, ok)
 		}
