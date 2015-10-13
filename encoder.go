@@ -21,7 +21,7 @@ const (
 
 type header struct {
 	MsgType msgType
-	ChanId  uint32
+	ChanId  int
 }
 
 type encoder struct {
@@ -29,8 +29,8 @@ type encoder struct {
 	creditCh <-chan credit  // from puller
 	man      *Manager
 
-	idTable map[hashedName]uint32
-	freshId uint32
+	idTable map[hashedName]int
+	freshId int
 	enc     *gob.Encoder
 	err     error
 }
@@ -62,7 +62,7 @@ func (e *encoder) deleteId(name hashedName, id int) {
 	e.encode(header{deleteIdMsg, id})
 }
 
-func (e *encoder) translateName(name hashedName) uint32 {
+func (e *encoder) translateName(name hashedName) int {
 	if e.err != nil {
 		return -1
 	}
