@@ -1,156 +1,81 @@
 package netchan
 
 import (
-	"sync"
+	"strconv"
 	"testing"
 	"time"
 )
 
 const smallBuf = 8
 
-func TestPushThenPull(t *testing.T) {
-	n := 50
-
-	conn := newConn()
-	s := make([]int, n)
-	done := make(chan struct{})
-
-	go func() { // producer
-		man1 := Manage(sideA(conn))
-		ch1 := make(chan int, smallBuf)
-		man1.Push(ch1, "netchan test")
+func intProducer(man *Manager, chName string, n int) {
+	go func() {
+		ch := make(chan int, smallBuf)
+		man.Push(ch, chName)
 		for i := 0; i < n; i++ {
-			ch1 <- i
+			ch <- i
 		}
-		close(ch1)
+		close(ch)
 	}()
+}
 
-	go func() { // consumer
-		time.Sleep(50 * time.Millisecond)
-		man2 := Manage(sideB(conn))
-		ch2 := make(chan int, smallBuf)
-		man2.Pull(ch2, "netchan test")
-		for i := range ch2 {
-			s[i] = i
+func intConsumer(man *Manager, chName string) <-chan []int {
+	sliceCh := make(chan []int, 1)
+	go func() {
+		var slice []int
+		ch := make(chan int, smallBuf)
+		man.Pull(ch, chName)
+		for i := range ch {
+			slice = append(slice, i)
 		}
-		done <- struct{}{}
+		sliceCh <- slice
 	}()
+	return sliceCh
+}
 
-	<-done
-	for i, j := range s {
-		if i != j {
-			t.Error("faileddddddddd", s)
+func checkIntSlice(s []int, t *testing.T) {
+	for i, si := range s {
+		if i != si {
+			t.Errorf("expected i == s[i], found i == %d, s[i] == %d", i, si)
 			return
 		}
 	}
+}
+
+func TestPushThenPull(t *testing.T) {
+	conn := newConn()
+	intProducer(Manage(sideA(conn)), "int chan", 100)
+	time.Sleep(50 * time.Millisecond)
+	s := <-intConsumer(Manage(sideB(conn)), "int chan")
+	checkIntSlice(s, t)
 }
 
 func TestPullThenPush(t *testing.T) {
-	n := 50
-
 	conn := newConn()
-	s := make([]int, n)
-	done := make(chan struct{})
-
-	go func() { // producer
-		time.Sleep(50 * time.Millisecond)
-		man1 := Manage(sideA(conn))
-		ch1 := make(chan int, smallBuf)
-		man1.Push(ch1, "netchan test")
-		for i := 0; i < n; i++ {
-			ch1 <- i
-		}
-		close(ch1)
-	}()
-
-	go func() { // consumer
-		man2 := Manage(sideB(conn))
-		ch2 := make(chan int, smallBuf)
-		man2.Pull(ch2, "netchan test")
-		for i := range ch2 {
-			s[i] = i
-		}
-		done <- struct{}{}
-	}()
-
-	<-done
-	for i, j := range s {
-		if i != j {
-			t.Error("faileddddddddd", s)
-			return
-		}
-	}
+	sliceCh := intConsumer(Manage(sideB(conn)), "int chan")
+	time.Sleep(50 * time.Millisecond)
+	intProducer(Manage(sideA(conn)), "int chan", 100)
+	checkIntSlice(<-sliceCh, t)
 }
 
 func TestManyChans(t *testing.T) {
-	n := 500
-
 	conn := newConn()
-	var s [3][]int
-	var wg sync.WaitGroup
-	wg.Add(3)
-
 	manA := Manage(sideA(conn))
 	manB := Manage(sideB(conn))
-
-	go func() { // producer1
-		ch1 := make(chan int, smallBuf)
-		manA.Push(ch1, "netchan test1")
-		for i := 0; i < n; i++ {
-			ch1 <- i
+	var sliceChs [10]<-chan []int
+	for i := range sliceChs {
+		chName := "int chan" + strconv.Itoa(i)
+		if i%2 == 0 {
+			// producer is sideA, consumer is sideB
+			intProducer(manA, chName, 100)
+			sliceChs[i] = intConsumer(manB, chName)
+		} else {
+			// producer is sideB, consumer is sideA
+			intProducer(manB, chName, 100)
+			sliceChs[i] = intConsumer(manA, chName)
 		}
-		close(ch1)
-	}()
-	go func() { // consumer1
-		ch2 := make(chan int, smallBuf)
-		manB.Pull(ch2, "netchan test1")
-		for i := range ch2 {
-			s[0] = append(s[0], i)
-		}
-		wg.Done()
-	}()
-
-	go func() { // producer2
-		ch1 := make(chan int, smallBuf)
-		manB.Push(ch1, "netchan test2")
-		for i := 0; i < n; i++ {
-			ch1 <- i
-		}
-		close(ch1)
-	}()
-	go func() { // consumer2
-		ch2 := make(chan int, smallBuf)
-		manA.Pull(ch2, "netchan test2")
-		for i := range ch2 {
-			s[1] = append(s[1], i)
-		}
-		wg.Done()
-	}()
-
-	go func() { // producer3
-		ch1 := make(chan int, smallBuf)
-		manA.Push(ch1, "netchan test3")
-		for i := 0; i < n; i++ {
-			ch1 <- i
-		}
-		close(ch1)
-	}()
-	go func() { // consumer3
-		ch2 := make(chan int, smallBuf)
-		manB.Pull(ch2, "netchan test3")
-		for i := range ch2 {
-			s[2] = append(s[2], i)
-		}
-		wg.Done()
-	}()
-
-	wg.Wait()
-	for k := 0; k < 3; k++ {
-		for i, j := range s[k] {
-			if i != j {
-				t.Error("faileddddddddd")
-				return
-			}
-		}
+	}
+	for _, ch := range sliceChs {
+		checkIntSlice(<-ch, t)
 	}
 }

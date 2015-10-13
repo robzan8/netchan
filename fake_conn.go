@@ -20,35 +20,31 @@ func (c *connection) Close() {
 	c.writeB.Close()
 }
 
-type side struct {
+type connSide struct {
 	io.Reader
 	io.Writer
 }
 
-func sideA(conn *connection) io.ReadWriter {
-	s := new(side)
+func sideA(conn *connection) (s connSide) {
 	s.Reader = conn.readA
 	s.Writer = conn.writeA
-	return s
+	return
 }
 
-func limSideA(conn *connection, n int) io.ReadWriter {
-	s := new(side)
+func limSideA(conn *connection, n int) (s connSide) {
 	s.Reader = NewLimGobReader(conn.readA, int64(n))
 	s.Writer = conn.writeA
-	return s
+	return
 }
 
-func sideB(conn *connection) io.ReadWriter {
-	s := new(side)
+func sideB(conn *connection) (s connSide) {
 	s.Reader = conn.readB
 	s.Writer = conn.writeB
-	return s
+	return
 }
 
-func limSideB(conn *connection, n int) io.ReadWriter {
-	s := new(side)
+func limSideB(conn *connection, n int) (s connSide) {
 	s.Reader = NewLimGobReader(conn.readB, int64(n))
 	s.Writer = conn.writeB
-	return s
+	return
 }
