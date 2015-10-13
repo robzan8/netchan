@@ -1,6 +1,9 @@
 package netchan
 
 import (
+	"crypto/sha1"
+	"encoding/binary"
+	"math/rand"
 	"strconv"
 	"testing"
 	"time"
@@ -77,5 +80,38 @@ func TestManyChans(t *testing.T) {
 	}
 	for _, ch := range sliceChs {
 		checkIntSlice(<-ch, t)
+	}
+}
+
+var mapN = 1000
+var r = rand.New(rand.NewSource(time.Now().UnixNano()))
+var intMap = make(map[int]int)
+var nameMap = make(map[hashedName]hashedName)
+var s = make([]hashedName, 1000)
+
+func init() {
+	for i := 0; i < mapN; i++ {
+		var name hashedName
+		binary.PutVarint(name[:], int64(i))
+		s[i] = sha1.Sum(name)
+	}
+	for i := 0; i < mapN; i++ {
+		j := r.Intn(n)
+		intMap[i] = j
+		nameMap[s[i]] = s[j]
+	}
+}
+
+func BenchmarkIntMap(b *testing.B) {
+	var i int
+	for n := 0; n < b.N; n++ {
+		i = intMap[i]
+	}
+}
+
+func BenchmarkNameMap(b *testing.B) {
+	var name hashedName
+	for n := 0; n < b.N; n++ {
+		name = nameMap[name]
 	}
 }

@@ -17,9 +17,11 @@ const (
 	errorMsg
 )
 
+// mechanism for getting fresh id is broken
+
 type header struct {
 	MsgType msgType
-	ChanId  int
+	ChanId  uint32
 }
 
 type encoder struct {
@@ -27,7 +29,8 @@ type encoder struct {
 	creditCh <-chan credit  // from puller
 	man      *Manager
 
-	idTable map[hashedName]int
+	idTable map[hashedName]uint32
+	freshId uint32
 	enc     *gob.Encoder
 	err     error
 }
@@ -59,7 +62,7 @@ func (e *encoder) deleteId(name hashedName, id int) {
 	e.encode(header{deleteIdMsg, id})
 }
 
-func (e *encoder) translateName(name hashedName) int {
+func (e *encoder) translateName(name hashedName) uint32 {
 	if e.err != nil {
 		return -1
 	}
@@ -67,8 +70,8 @@ func (e *encoder) translateName(name hashedName) int {
 	if present {
 		return id
 	}
-	// get a fresh id
-	id = len(e.idTable)
+	id = e.freshId
+	e.freshId++ // don't care if overflows
 	e.idTable[name] = id
 	e.encode(header{setIdMsg, id})
 	e.encode(name)
@@ -79,33 +82,33 @@ func (e *encoder) run() {
 	for e.elemCh != nil || e.creditCh != nil {
 		select {
 		case elem, ok := <-e.elemCh:
-			if ok {
-				id := e.translateName(elem.chName)
-				e.encode(header{elemMsg, id})
-				e.encodeVal(elem.val)
-				e.encode(elem.ok)
-				if !elem.ok {
-					// channel we are pushing is being closed
-					e.deleteId(elem.chName, id)
-				}
-			} else {
+			if !ok {
 				e.elemCh = nil
+				continue
+			}
+			id := e.translateName(elem.chName)
+			e.encode(header{elemMsg, id})
+			e.encodeVal(elem.val)
+			e.encode(elem.ok)
+			if !elem.ok {
+				// channel we are pushing is being closed
+				e.deleteId(elem.chName, id)
 			}
 
 		case cred, ok := <-e.creditCh:
-			if ok {
-				id := e.translateName(cred.chName)
-				if cred.incr == 0 {
-					// channel we are pulling is being closed
-					e.deleteId(cred.chName, id)
-				} else {
-					e.encode(header{creditMsg, id})
-					e.encode(cred.incr)
-					e.encode(cred.open)
-				}
-			} else {
+			if !ok {
 				e.creditCh = nil
+				continue
 			}
+			id := e.translateName(cred.chName)
+			if cred.incr == 0 {
+				// channel we are pulling is being closed
+				e.deleteId(cred.chName, id)
+				continue
+			}
+			e.encode(header{creditMsg, id})
+			e.encode(cred.incr)
+			e.encode(cred.open)
 		}
 	}
 	e.encode(header{errorMsg, -1})
