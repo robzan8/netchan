@@ -2,7 +2,6 @@ package netchan
 
 import (
 	"crypto/sha1"
-	"encoding/gob"
 	"errors"
 	"io"
 	"reflect"
@@ -27,6 +26,7 @@ type element struct {
 type credit struct {
 	chName hashedName
 	incr   int
+	open   bool
 }
 
 type Manager struct {
@@ -42,45 +42,52 @@ type Manager struct {
 
 func Manage(conn io.ReadWriter) *Manager {
 	const chCap int = 8
-
-	pushReq := make(chan addReq)
+	pushReq := make(chan addReq) // these must be unbuffered
 	pullReq := make(chan addReq)
 	pushResp := make(chan error)
 	pullResp := make(chan error)
-	m := &Manager{pushReq: pushReq, pullReq: pullReq, pushResp: pushResp, pullResp: pullResp}
-	m.err.Store((*error)(nil))
-	m.gotErr = make(chan struct{})
-
 	encElemCh := make(chan element, chCap)
 	encCredCh := make(chan credit, chCap)
-	enc := newEncoder(encElemCh, encCredCh, m, conn)
-
 	decElemCh := make(chan element, chCap)
 	decCredCh := make(chan credit, chCap)
 	types := &typeMap{m: make(map[hashedName]reflect.Type)}
-	dec := &decoder{
-		toPuller: decElemCh,
-		toPusher: decCredCh,
-		man:      m,
-		types:    types,
-		dec:      gob.NewDecoder(conn),
-	}
 
-	push := newPusher(encElemCh, decCredCh, pushReq, pushResp, m)
+	m := &Manager{pushReq: pushReq, pullReq: pullReq, pushResp: pushResp, pullResp: pullResp}
+	m.err.Store((*error)(nil))
+	m.gotErr = make(chan struct{})
+	push := &pusher{
+		toEncoder: encElemCh,
+		creditCh:  decCredCh,
+		pushReq:   pushReq,
+		pushResp:  pushResp,
+		man:       m,
+	}
+	push.initialize()
 	pull := &puller{
 		elemCh:    decElemCh,
 		toEncoder: encCredCh,
 		pullReq:   pullReq,
 		pullResp:  pullResp,
-		man:       m,
-		chans:     make(map[hashedName]pullInfo),
 		types:     types,
+		man:       m,
 	}
+	pull.initialize()
+	enc := &encoder{elemCh: encElemCh, creditCh: encCredCh, man: m}
+	enc.initialize(conn)
+	dec := &decoder{
+		toPuller:  decElemCh,
+		toPusher:  decCredCh,
+		pushCount: &push.count,
+		pullCount: &pull.count,
+		types:     types,
+		man:       m,
+	}
+	dec.initialize(conn)
 
-	go enc.run()
-	go dec.run()
 	go push.run()
 	go pull.run()
+	go enc.run()
+	go dec.run()
 	return m
 }
 

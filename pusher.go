@@ -11,6 +11,14 @@ var (
 	errSynFlood       = errors.New("netchan pusher: too many half open push requests")
 )
 
+const maxHalfOpen = 256
+
+const (
+	pushReqCase int = iota
+	creditCase
+	elemCase
+)
+
 type pushInfo struct {
 	ch     reflect.Value
 	credit int
@@ -29,22 +37,12 @@ type pusher struct {
 	names []hashedName
 }
 
-const maxHalfOpen = 256
-
-const (
-	pushReqCase int = iota
-	creditCase
-	elemCase
-)
-
-func newPusher(toEncoder chan<- element, creditCh <-chan credit, pushReq <-chan addReq, pushResp chan<- error, man *Manager) *pusher {
-	p := &pusher{toEncoder: toEncoder, creditCh: creditCh, pushReq: pushReq, pushResp: pushResp, man: man}
+func (p *pusher) initialize() {
 	p.chans = make(map[hashedName]pushInfo)
 	p.cases = make([]reflect.SelectCase, elemCase, elemCase*2)
-	p.cases[pushReqCase] = reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(pushReq)}
-	p.cases[creditCase] = reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(creditCh)}
+	p.cases[pushReqCase] = reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(p.pushReq)}
+	p.cases[creditCase] = reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(p.creditCh)}
 	p.names = make([]hashedName, elemCase, elemCase*2)
-	return p
 }
 
 func (p *pusher) add(ch reflect.Value, name hashedName) error {
@@ -59,12 +57,18 @@ func (p *pusher) add(ch reflect.Value, name hashedName) error {
 }
 
 func (p *pusher) handleCredit(cred credit) {
-	info := p.chans[cred.chName]
-	/*if !present && something {
+	halfOpen := int64(len(p.chans)) - atomic.LoadInt64(&p.count)
+	if halfOpen >= maxHalfOpen {
 		p.man.signalError(errSynFlood)
-		// control flow to handle error?
 		return
-	}*/
+	}
+	info, present := p.chans[cred.chName]
+	if !present && !cred.open {
+		// we got a credit message for a channel that we are not pushing
+		// and it's not a new channel that peer wants to open;
+		// might happen when a channel is being closed, ignore it
+		return
+	}
 	info.credit += cred.incr
 	p.chans[cred.chName] = info
 }

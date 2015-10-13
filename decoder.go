@@ -3,16 +3,20 @@ package netchan
 import (
 	"encoding/gob"
 	"errors"
+	"io"
 	"reflect"
+	"sync/atomic"
 )
 
 var (
-	errCacheCapExceeded = errors.New("netchan decoder: idCacheCap exceeded")
-	errInvalidId        = errors.New("netchan decoder: out of bounds id received")
-	errInvalidMsgType   = errors.New("netchan decoder: message with invalid type received")
-	errInvalidCred      = errors.New("netchan decoder: credit with non-positive value received")
-	errUnwantedElem     = errors.New("netchan decoder: element received for channel not being pulled")
+	errTableLenTooBig = errors.New("netchan decoder: idTable length bigger than number of channels")
+	errInvalidId      = errors.New("netchan decoder: out of bounds id received")
+	errInvalidMsgType = errors.New("netchan decoder: message with invalid type received")
+	errInvalidCred    = errors.New("netchan decoder: credit with non-positive value received")
+	errUnwantedElem   = errors.New("netchan decoder: element received for channel not being pulled")
 )
+
+const tableLenTolerance = 256
 
 type decError struct {
 	err error
@@ -23,13 +27,20 @@ func raiseError(err error) {
 }
 
 type decoder struct {
-	toPuller chan<- element
-	toPusher chan<- credit
-	man      *Manager
+	toPuller  chan<- element
+	toPusher  chan<- credit
+	pushCount *int64
+	pullCount *int64
+	types     *typeMap
+	man       *Manager
 
-	types   *typeMap
-	idCache []hashedName
+	idTable map[int]hashedName
 	dec     *gob.Decoder
+}
+
+func (d *decoder) initialize(conn io.Reader) {
+	d.idTable = make(map[int]hashedName)
+	d.dec = gob.NewDecoder(conn)
 }
 
 func (d *decoder) decodeVal(v reflect.Value) {
@@ -44,8 +55,9 @@ func (d *decoder) decode(v interface{}) {
 }
 
 func (d *decoder) translateId(id int) hashedName {
-	if 0 <= id && id < len(d.idCache) {
-		return d.idCache[id]
+	name, present := d.idTable[id]
+	if present {
+		return name
 	}
 	raiseError(errInvalidId)
 	return hashedName{}
@@ -76,24 +88,23 @@ func (d *decoder) run() {
 			var cred credit
 			cred.chName = d.translateId(h.ChanId)
 			d.decode(&cred.incr)
+			d.decode(&cred.open)
 			if cred.incr <= 0 {
 				raiseError(errInvalidCred)
 			}
 			d.toPusher <- cred
 
 		case setIdMsg:
+			chanCount := atomic.LoadInt64(d.pushCount) + atomic.LoadInt64(d.pullCount)
+			if int64(len(d.idTable)) > chanCount+tableLenTolerance {
+				raiseError(errTableLenTooBig)
+			}
 			var name hashedName
 			d.decode(&name)
-			switch {
-			case h.ChanId == len(d.idCache) && len(d.idCache) < idCacheCap:
-				d.idCache = append(d.idCache, name)
-			case 0 <= h.ChanId && h.ChanId < len(d.idCache):
-				d.idCache[h.ChanId] = name
-			case h.ChanId == len(d.idCache) && len(d.idCache) >= idCacheCap:
-				raiseError(errCacheCapExceeded)
-			default:
-				raiseError(errInvalidId)
-			}
+			d.idTable[h.ChanId] = name
+
+		case deleteIdMsg:
+			delete(d.idTable, h.ChanId)
 
 		case errorMsg:
 			var errString string

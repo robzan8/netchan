@@ -3,19 +3,8 @@ package netchan
 import (
 	"encoding/gob"
 	"io"
-	"math/rand"
 	"reflect"
-	"time"
 )
-
-/*
-genius idea!:
-keep atomic counter of chans you are pushing and pulling.
-based on that, calculate how many half-open connections
-and idCache entries you are willing to keep
-*/
-
-const idCacheCap = 257
 
 type msgType int
 
@@ -24,6 +13,7 @@ const (
 	elemMsg
 	creditMsg
 	setIdMsg
+	deleteIdMsg
 	errorMsg
 )
 
@@ -37,18 +27,14 @@ type encoder struct {
 	creditCh <-chan credit  // from puller
 	man      *Manager
 
-	idCache map[hashedName]int
-	rand    *rand.Rand
+	idTable map[hashedName]int
 	enc     *gob.Encoder
 	err     error
 }
 
-func newEncoder(elemCh <-chan element, creditCh <-chan credit, man *Manager, conn io.Writer) *encoder {
-	e := &encoder{elemCh: elemCh, creditCh: creditCh, man: man}
-	e.idCache = make(map[hashedName]int)
-	e.rand = rand.New(rand.NewSource(time.Now().UnixNano()))
+func (e *encoder) initialize(conn io.Writer) {
+	e.idTable = make(map[hashedName]int)
 	e.enc = gob.NewEncoder(conn)
-	return e
 }
 
 func (e *encoder) encodeVal(v reflect.Value) {
@@ -65,32 +51,25 @@ func (e *encoder) encode(v interface{}) {
 	e.encodeVal(reflect.ValueOf(v))
 }
 
+func (e *encoder) deleteId(name hashedName, id int) {
+	if e.err != nil {
+		return
+	}
+	delete(e.idTable, name)
+	e.encode(header{deleteIdMsg, id})
+}
+
 func (e *encoder) translateName(name hashedName) int {
 	if e.err != nil {
 		return -1
 	}
-	id, present := e.idCache[name]
+	id, present := e.idTable[name]
 	if present {
 		return id
 	}
-	if len(e.idCache) < idCacheCap {
-		// get a fresh id
-		id = len(e.idCache)
-	} else {
-		// delete a random element from idCache and take its id
-		randIndex := e.rand.Intn(len(e.idCache))
-		i := 0
-		var victim hashedName
-		for victim, id = range e.idCache {
-			if i == randIndex {
-				delete(e.idCache, victim)
-				// id is set
-				break
-			}
-			i++
-		}
-	}
-	e.idCache[name] = id
+	// get a fresh id
+	id = len(e.idTable)
+	e.idTable[name] = id
 	e.encode(header{setIdMsg, id})
 	e.encode(name)
 	return id
@@ -105,6 +84,10 @@ func (e *encoder) run() {
 				e.encode(header{elemMsg, id})
 				e.encodeVal(elem.val)
 				e.encode(elem.ok)
+				if !elem.ok {
+					// channel we are pushing is being closed
+					e.deleteId(elem.chName, id)
+				}
 			} else {
 				e.elemCh = nil
 			}
@@ -112,8 +95,14 @@ func (e *encoder) run() {
 		case cred, ok := <-e.creditCh:
 			if ok {
 				id := e.translateName(cred.chName)
-				e.encode(header{creditMsg, id})
-				e.encode(cred.incr)
+				if cred.incr == 0 {
+					// channel we are pulling is being closed
+					e.deleteId(cred.chName, id)
+				} else {
+					e.encode(header{creditMsg, id})
+					e.encode(cred.incr)
+					e.encode(cred.open)
+				}
 			} else {
 				e.creditCh = nil
 			}

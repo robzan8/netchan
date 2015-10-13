@@ -26,11 +26,15 @@ type puller struct {
 	toEncoder chan<- credit
 	pullReq   <-chan addReq // from Manager.Pull (user)
 	pullResp  chan<- error
+	types     *typeMap
 	man       *Manager
 
 	chans map[hashedName]pullInfo
 	count int64
-	types *typeMap
+}
+
+func (p *puller) initialize() {
+	p.chans = make(map[hashedName]pullInfo)
 }
 
 const bufCap = 512
@@ -70,18 +74,21 @@ func (p *puller) handleElem(elem element) {
 }
 
 func bufferer(buf <-chan reflect.Value, ch reflect.Value, name hashedName, toEncoder chan<- credit) {
-	toEncoder <- credit{name, bufCap}
+	toEncoder <- credit{name, bufCap, true}
 	sent := 0
 	for {
 		val, ok := <-buf
 		if !ok {
 			ch.Close()
+			toEncoder <- credit{name, 0, false}
+			// a zero credit is used to signal to the encoder
+			// that the channel is being closed/removed
 			return
 		}
 		ch.Send(val)
 		sent++
 		if sent*2 >= bufCap { // i.e. sent >= ceil(bufCap/2)
-			toEncoder <- credit{name, sent}
+			toEncoder <- credit{name, sent, false}
 			sent = 0
 		}
 	}
@@ -92,7 +99,6 @@ func (p *puller) run() {
 		select {
 		case req := <-p.pullReq:
 			p.pullResp <- p.add(req.ch, req.name)
-
 		case elem, ok := <-p.elemCh:
 			if !ok {
 				// error occurred and decoder shut down
