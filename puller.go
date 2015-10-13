@@ -4,6 +4,7 @@ import (
 	"errors"
 	"reflect"
 	"sync"
+	"sync/atomic"
 )
 
 var (
@@ -27,7 +28,8 @@ type puller struct {
 	pullResp  chan<- error
 	man       *Manager
 
-	chans map[hashedName]*pullInfo
+	chans map[hashedName]pullInfo
+	count int64
 	types *typeMap
 }
 
@@ -39,10 +41,11 @@ func (p *puller) add(ch reflect.Value, name hashedName) error {
 		return errAlreadyPulling
 	}
 	buf := make(chan reflect.Value, bufCap)
-	p.chans[name] = &pullInfo{buf}
+	p.chans[name] = pullInfo{buf}
 	p.types.Lock()
 	p.types.m[name] = ch.Type().Elem()
 	p.types.Unlock()
+	atomic.AddInt64(&p.count, 1)
 
 	go bufferer(buf, ch, name, p.toEncoder)
 	return nil
@@ -56,6 +59,7 @@ func (p *puller) handleElem(elem element) {
 		p.types.Lock()
 		delete(p.types.m, elem.chName)
 		p.types.Unlock()
+		atomic.AddInt64(&p.count, -1)
 		return
 	}
 	if len(info.buf) == cap(info.buf) {

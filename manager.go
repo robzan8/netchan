@@ -73,7 +73,7 @@ func Manage(conn io.ReadWriter) *Manager {
 		pullReq:   pullReq,
 		pullResp:  pullResp,
 		man:       m,
-		chans:     make(map[hashedName]*pullInfo),
+		chans:     make(map[hashedName]pullInfo),
 		types:     types,
 	}
 

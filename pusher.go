@@ -3,6 +3,7 @@ package netchan
 import (
 	"errors"
 	"reflect"
+	"sync/atomic"
 )
 
 var (
@@ -22,10 +23,10 @@ type pusher struct {
 	pushResp  chan<- error
 	man       *Manager
 
-	chans    map[hashedName]*pushInfo
-	cases    []reflect.SelectCase
-	names    []hashedName
-	halfOpen int
+	chans map[hashedName]pushInfo
+	count int64
+	cases []reflect.SelectCase
+	names []hashedName
 }
 
 const maxHalfOpen = 256
@@ -38,7 +39,7 @@ const (
 
 func newPusher(toEncoder chan<- element, creditCh <-chan credit, pushReq <-chan addReq, pushResp chan<- error, man *Manager) *pusher {
 	p := &pusher{toEncoder: toEncoder, creditCh: creditCh, pushReq: pushReq, pushResp: pushResp, man: man}
-	p.chans = make(map[hashedName]*pushInfo)
+	p.chans = make(map[hashedName]pushInfo)
 	p.cases = make([]reflect.SelectCase, elemCase, elemCase*2)
 	p.cases[pushReqCase] = reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(pushReq)}
 	p.cases[creditCase] = reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(creditCh)}
@@ -48,39 +49,36 @@ func newPusher(toEncoder chan<- element, creditCh <-chan credit, pushReq <-chan 
 
 func (p *pusher) add(ch reflect.Value, name hashedName) error {
 	info, present := p.chans[name]
-	if present {
-		if info.ch != (reflect.Value{}) {
-			return errAlreadyPushing
-		}
-		info.ch = ch
-		p.halfOpen--
-		return nil
+	if present && info.ch != (reflect.Value{}) {
+		return errAlreadyPushing
 	}
-	p.chans[name] = &pushInfo{ch: ch}
+	info.ch = ch
+	p.chans[name] = info
+	atomic.AddInt64(&p.count, 1)
 	return nil
 }
 
 func (p *pusher) handleCredit(cred credit) {
-	info, present := p.chans[cred.chName]
-	if !present {
-		if p.halfOpen >= maxHalfOpen {
-			p.man.signalError(errSynFlood)
-			return
-		}
-		info = new(pushInfo)
-		p.chans[cred.chName] = info
-		p.halfOpen++
-	}
+	info := p.chans[cred.chName]
+	/*if !present && something {
+		p.man.signalError(errSynFlood)
+		// control flow to handle error?
+		return
+	}*/
 	info.credit += cred.incr
+	p.chans[cred.chName] = info
 }
 
 func (p *pusher) handleElem(name hashedName, val reflect.Value, ok bool) {
 	p.toEncoder <- element{name, val, ok}
 	if !ok {
 		delete(p.chans, name)
+		atomic.AddInt64(&p.count, -1)
 		return
 	}
-	p.chans[name].credit--
+	info := p.chans[name]
+	info.credit--
+	p.chans[name] = info
 }
 
 func (p *pusher) run() {

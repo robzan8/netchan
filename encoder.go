@@ -8,6 +8,13 @@ import (
 	"time"
 )
 
+/*
+genius idea!:
+keep atomic counter of chans you are pushing and pulling.
+based on that, calculate how many half-open connections
+and idCache entries you are willing to keep
+*/
+
 const idCacheCap = 257
 
 type msgType int
