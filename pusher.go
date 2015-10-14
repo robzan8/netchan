@@ -19,10 +19,11 @@ const (
 	elemCase = 8 // reserve first 8 slots to other possible select cases
 )
 
-type pushInfo struct {
-	ch     reflect.Value
-	name   hashedName
-	credit int
+type chanEntry struct {
+	name    hashedName
+	ch      reflect.Value
+	credit  int
+	present bool
 }
 
 type pusher struct {
@@ -32,10 +33,10 @@ type pusher struct {
 	pushResp  chan<- error
 	man       *Manager
 
-	halfOpen int
 	pending  map[hashedName]reflect.Value
-	chans    []pushInfo
+	table    []chanEntry
 	cases    []reflect.SelectCase
+	halfOpen int
 }
 
 func (p *pusher) initialize() {
@@ -45,44 +46,59 @@ func (p *pusher) initialize() {
 	p.names = make([]hashedName, elemCase)
 }
 
-func infoByName(chans []pushInfo, name hashedName) *pushInfo {
-	for i := range chans {
-		if chans[i].name == name {
-			return &chans[i]
+func infoByName(table []chanEntry, name hashedName) *chanEntry {
+	for i := range table {
+		if table[i].name == name {
+			return &table[i]
 		}
 	}
 	return nil
 }
 
 func (p *pusher) add(ch reflect.Value, name hashedName) error {
-	info := infoByName(p.chans, name)
-	if info != nil {
-		if info.ch != (reflect.Value{}) {
+	info := infoByName
+	if present {
+		if p.table[id].ch != (reflect.Value{}) {
 			return errAlreadyPushing
 		}
-		info.ch = ch
+		p.table[id].ch = ch
 		p.halfOpen--
 		return nil
 	}
+	_, present = p.pending[name]
+	if present {
+		return errAlreadyPushing
+	}
 	p.pending[name] = ch
-	// check if present? how dumb can the user be?
 	return nil
 }
 
 func (p *pusher) handleCredit(cred credit) error {
-	if cred.name == "" {
+	if !cred.open {
 		if cred.id < 0 || cred.id >= len(p.chans) {
 			return errBadId
+		}
+		if p.chans[cred.id] == (chanEntry{}) {
+			// probably the channel has just been removed,
+			// we must ignore the credit, increasing it makes
+			// it look like the channel is there
+			return nil
 		}
 		p.chans[cred.id].credit += cred.incr
 		return nil
 	}
 	// credit message wants to open a new channel
-	info := pushInfo{name: cred.name, credit: cred.incr}
+	p.index[cred.name] = cred.id
+	info := chanEntry{credit: cred.incr}
 	ch, present := p.pending[cred.name]
 	if present {
 		info.ch = ch
 		delete(p.pending, cred.name)
+	} else {
+		p.halfOpen++
+		if halfOpen > maxHalfOpen {
+			return errSynFlood
+		}
 	}
 	if cred.id == len(p.chans) {
 		// cred.id is a fresh slot
@@ -91,26 +107,14 @@ func (p *pusher) handleCredit(cred credit) error {
 	}
 	if cred.id >= 0 && cred.id < len(p.chans) {
 		// cred.id is an old slot
-		if p.chans != (pushInfo{}) {
+		if p.chans[cred.id].present {
+			// slot is not free
 			return errBadId
 		}
 		p.chans[cred.id] = info
 		return nil
 	}
-	/* there can be "holes" in p.chans
-	if halfOpen >= maxHalfOpen {
-		p.man.signalError(errSynFlood)
-		return
-	}
-	info, present := p.chans[cred.chName]
-	if !present && !cred.open {
-		// we got a credit message for a channel that we are not pushing
-		// and it's not a new channel that peer wants to open;
-		// might happen when a channel is being closed, ignore it
-		return
-	}
-	info.credit += cred.incr
-	p.chans[cred.chName] = info*/
+	return errBadId
 }
 
 func (p *pusher) handleElem(name hashedName, val reflect.Value, ok bool) {
@@ -151,7 +155,10 @@ func (p *pusher) run() {
 				close(p.toEncoder)
 				return
 			}
-			p.handleCredit(val.Interface().(credit))
+			err := p.handleCredit(val.Interface().(credit))
+			if err != nil {
+				p.man.signalError(err)
+			}
 		default: // i >= elemCase
 			p.handleElem(p.names[i], val, ok)
 		}

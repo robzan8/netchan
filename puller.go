@@ -12,8 +12,10 @@ var (
 	errCredExceeded   = errors.New("netchan puller: peer sent more elements than its credit allowed")
 )
 
-type pullInfo struct {
-	buf chan reflect.Value
+type pullEntry struct {
+	name    hashedName
+	buf     chan reflect.Value
+	present bool
 }
 
 type typeMap struct {
@@ -29,29 +31,53 @@ type puller struct {
 	types     *typeMap
 	man       *Manager
 
-	chans map[hashedName]pullInfo
-	count int64
+	table []pullEntry
 }
 
 func (p *puller) initialize() {
-	p.chans = make(map[hashedName]pullInfo)
+	p.table = make([]pullEntry, firstEntry)
+	// first #firstEntry entries are reserved
+	for i := range p.table {
+		p.table[i].present = true
+	}
+}
+
+func (p *puller) entryByName(name hashedName) *pullEntry {
+	for i := firstEntry; i < len(p.table); i++ {
+		if table[i].name == name {
+			return &table[i]
+		}
+	}
+	return nil
 }
 
 const bufCap = 512
 
 func (p *puller) add(ch reflect.Value, name hashedName) error {
-	_, present := p.chans[name]
-	if present {
+	entry := p.entryByName(name)
+	if entry != nil {
 		return errAlreadyPulling
 	}
+	// get an id for the new channel
+	id := -1
+	for i := firstEntry; i < len(p.table); i++ {
+		if !table[i].present {
+			id = i
+			break
+		}
+	}
+	if id == -1 {
+		id := len(p.table)
+		p.table = append(p.table, pullEntry{})
+	}
+
 	buf := make(chan reflect.Value, bufCap)
-	p.chans[name] = pullInfo{buf}
+	p.table[id] = pullEntry{name, buf, true}
 	p.types.Lock()
 	p.types.m[name] = ch.Type().Elem()
 	p.types.Unlock()
-	atomic.AddInt64(&p.count, 1)
 
-	go bufferer(buf, ch, name, p.toEncoder)
+	go bufferer(buf, ch, id, name, p.toEncoder)
 	return nil
 }
 
@@ -73,22 +99,19 @@ func (p *puller) handleElem(elem element) {
 	info.buf <- elem.val
 }
 
-func bufferer(buf <-chan reflect.Value, ch reflect.Value, name hashedName, toEncoder chan<- credit) {
-	toEncoder <- credit{name, bufCap, true}
+func bufferer(buf <-chan reflect.Value, ch reflect.Value, id int, name hashedName, toEncoder chan<- credit) {
+	toEncoder <- credit{id, bufCap, true, name}
 	sent := 0
 	for {
 		val, ok := <-buf
 		if !ok {
 			ch.Close()
-			toEncoder <- credit{name, 0, false}
-			// a zero credit is used to signal to the encoder
-			// that the channel is being closed/removed
 			return
 		}
 		ch.Send(val)
 		sent++
 		if sent*2 >= bufCap { // i.e. sent >= ceil(bufCap/2)
-			toEncoder <- credit{name, sent, false}
+			toEncoder <- credit{id, sent, false, hashedName{}}
 			sent = 0
 		}
 	}
