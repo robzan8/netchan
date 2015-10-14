@@ -17,16 +17,20 @@ var (
 // sha1-hashed name of a net channel
 type hashedName [20]byte
 
+func hashName(name string) hashedName {
+	return sha1.Sum([]byte(name))
+}
+
 type element struct {
-	chName hashedName
-	val    reflect.Value
-	ok     bool // if not ok, the channel has been closed
+	id  int
+	val reflect.Value
+	ok  bool // if not ok, the channel has been closed
 }
 
 type credit struct {
-	chName hashedName
-	incr   int
-	open   bool
+	id   int
+	incr int
+	name hashedName
 }
 
 type Manager struct {

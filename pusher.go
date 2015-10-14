@@ -16,11 +16,12 @@ const maxHalfOpen = 256
 const (
 	pushReqCase int = iota
 	creditCase
-	elemCase
+	elemCase = 8 // reserve first 8 slots to other possible select cases
 )
 
 type pushInfo struct {
 	ch     reflect.Value
+	name   hashedName
 	credit int
 }
 
@@ -31,33 +32,72 @@ type pusher struct {
 	pushResp  chan<- error
 	man       *Manager
 
-	chans map[hashedName]pushInfo
-	count int64
-	cases []reflect.SelectCase
-	names []hashedName
+	halfOpen int
+	pending  map[hashedName]reflect.Value
+	chans    []pushInfo
+	cases    []reflect.SelectCase
 }
 
 func (p *pusher) initialize() {
-	p.chans = make(map[hashedName]pushInfo)
-	p.cases = make([]reflect.SelectCase, elemCase, elemCase*2)
+	p.cases = make([]reflect.SelectCase, elemCase)
 	p.cases[pushReqCase] = reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(p.pushReq)}
 	p.cases[creditCase] = reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(p.creditCh)}
-	p.names = make([]hashedName, elemCase, elemCase*2)
+	p.names = make([]hashedName, elemCase)
 }
 
-func (p *pusher) add(ch reflect.Value, name hashedName) error {
-	info, present := p.chans[name]
-	if present && info.ch != (reflect.Value{}) {
-		return errAlreadyPushing
+func infoByName(chans []pushInfo, name hashedName) *pushInfo {
+	for i := range chans {
+		if chans[i].name == name {
+			return &chans[i]
+		}
 	}
-	info.ch = ch
-	p.chans[name] = info
-	atomic.AddInt64(&p.count, 1)
 	return nil
 }
 
-func (p *pusher) handleCredit(cred credit) {
-	halfOpen := int64(len(p.chans)) - atomic.LoadInt64(&p.count)
+func (p *pusher) add(ch reflect.Value, name hashedName) error {
+	info := infoByName(p.chans, name)
+	if info != nil {
+		if info.ch != (reflect.Value{}) {
+			return errAlreadyPushing
+		}
+		info.ch = ch
+		p.halfOpen--
+		return nil
+	}
+	p.pending[name] = ch
+	// check if present? how dumb can the user be?
+	return nil
+}
+
+func (p *pusher) handleCredit(cred credit) error {
+	if cred.name == "" {
+		if cred.id < 0 || cred.id >= len(p.chans) {
+			return errBadId
+		}
+		p.chans[cred.id].credit += cred.incr
+		return nil
+	}
+	// credit message wants to open a new channel
+	info := pushInfo{name: cred.name, credit: cred.incr}
+	ch, present := p.pending[cred.name]
+	if present {
+		info.ch = ch
+		delete(p.pending, cred.name)
+	}
+	if cred.id == len(p.chans) {
+		// cred.id is a fresh slot
+		p.chans = append(p.chans, info)
+		return nil
+	}
+	if cred.id >= 0 && cred.id < len(p.chans) {
+		// cred.id is an old slot
+		if p.chans != (pushInfo{}) {
+			return errBadId
+		}
+		p.chans[cred.id] = info
+		return nil
+	}
+	/* there can be "holes" in p.chans
 	if halfOpen >= maxHalfOpen {
 		p.man.signalError(errSynFlood)
 		return
@@ -70,7 +110,7 @@ func (p *pusher) handleCredit(cred credit) {
 		return
 	}
 	info.credit += cred.incr
-	p.chans[cred.chName] = info
+	p.chans[cred.chName] = info*/
 }
 
 func (p *pusher) handleElem(name hashedName, val reflect.Value, ok bool) {
