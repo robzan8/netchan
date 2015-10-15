@@ -76,7 +76,7 @@ func TestManyChans(t *testing.T) {
 	conn := newConn()
 	manA := Manage(sideA(conn))
 	manB := Manage(sideB(conn))
-	var sliceChs [10]<-chan []int
+	var sliceChs [30]<-chan []int
 	for i := range sliceChs {
 		chName := "int chan" + strconv.Itoa(i)
 		if i%2 == 0 {

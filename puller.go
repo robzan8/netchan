@@ -71,6 +71,7 @@ func (p *puller) add(ch reflect.Value, name hashedName) error {
 	}
 	p.types.Unlock()
 
+	p.toEncoder <- credit{id, bufCap, true, &name}
 	go bufferer(id, name, buf, ch, p.toEncoder)
 	return nil
 }
@@ -99,7 +100,6 @@ func (p *puller) handleElem(elem element) error {
 }
 
 func bufferer(id int, name hashedName, buf <-chan reflect.Value, ch reflect.Value, toEncoder chan<- credit) {
-	toEncoder <- credit{id, bufCap, true, &name}
 	sent := 0
 	for {
 		val, ok := <-buf
