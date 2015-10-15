@@ -59,6 +59,9 @@ func (e *encoder) run() {
 				e.encode(header{creditMsg, cred.id})
 				e.encode(cred.incr)
 				e.encode(cred.open)
+				if cred.open {
+					e.encode(cred.name)
+				}
 			} else {
 				e.creditCh = nil
 			}

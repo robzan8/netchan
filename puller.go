@@ -51,7 +51,7 @@ func (p *puller) add(ch reflect.Value, name hashedName) error {
 	// get an id for the new channel
 	id := len(p.table)
 	for i := range p.table {
-		if p.table[i].buf == nil {
+		if p.table[i].name == (hashedName{}) {
 			id = i
 			break
 		}
@@ -62,6 +62,10 @@ func (p *puller) add(ch reflect.Value, name hashedName) error {
 		p.table = append(p.table, pullEntry{name, buf})
 		p.types.table = append(p.types.table, ch.Type().Elem())
 	} else {
+		if p.table[id].name != (hashedName{}) {
+			p.types.Unlock()
+			return errBadId
+		}
 		p.table[id] = pullEntry{name, buf}
 		p.types.table[id] = ch.Type().Elem()
 	}
@@ -71,22 +75,27 @@ func (p *puller) add(ch reflect.Value, name hashedName) error {
 	return nil
 }
 
-func (p *puller) handleElem(elem element) {
-	// id is good, decoder checked with p.types (if deleted/closed?)!
+func (p *puller) handleElem(elem element) error {
+	if elem.id >= len(p.table) {
+		return errBadId
+	}
 	entry := &p.table[elem.id]
+	if entry.name == (hashedName{}) {
+		return errBadId
+	}
 	if !elem.ok { // netchan closed normally
 		close(entry.buf)
-		entry.buf = nil
+		entry.name = hashedName{}
 		p.types.Lock()
 		p.types.table[elem.id] = nil
 		p.types.Unlock()
-		return
+		return nil
 	}
 	if len(entry.buf) == cap(entry.buf) {
-		p.man.signalError(errCredExceeded)
-		return
+		return errCredExceeded
 	}
 	entry.buf <- elem.val
+	return nil
 }
 
 func bufferer(id int, name hashedName, buf <-chan reflect.Value, ch reflect.Value, toEncoder chan<- credit) {
@@ -115,13 +124,17 @@ func (p *puller) run() {
 		case elem, ok := <-p.elemCh:
 			if !ok {
 				// error occurred and decoder shut down
+				// TODO: bug here! wait that bufferers are done before closing toEncoder
 				for _, info := range p.table {
 					close(info.buf)
 				}
 				close(p.toEncoder)
 				return
 			}
-			p.handleElem(elem)
+			err := p.handleElem(elem)
+			if err != nil {
+				p.man.signalError(err)
+			}
 		}
 	}
 }

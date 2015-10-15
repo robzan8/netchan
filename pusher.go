@@ -19,10 +19,9 @@ const (
 )
 
 type pushEntry struct {
-	name    hashedName
-	ch      reflect.Value
-	credit  int
-	present bool
+	name   hashedName
+	ch     reflect.Value
+	credit int
 }
 
 type pusher struct {
@@ -79,11 +78,15 @@ func (p *pusher) handleCredit(cred credit) error {
 		if cred.id >= len(p.table) {
 			return errBadId
 		}
+		if p.table[cred.id].name == (hashedName{}) {
+			// credit to deleted channel, ignore
+			return nil
+		}
 		p.table[cred.id].credit += cred.incr
 		return nil
 	}
 	// credit message wants to open a new channel
-	entry := pushEntry{name: *cred.name, credit: cred.incr, present: true}
+	entry := pushEntry{name: *cred.name, credit: cred.incr}
 	ch, present := p.pending[*cred.name]
 	if present {
 		entry.ch = ch
@@ -101,7 +104,7 @@ func (p *pusher) handleCredit(cred credit) error {
 	}
 	if cred.id < len(p.table) {
 		// cred.id is an old slot
-		if p.table[cred.id].present {
+		if p.table[cred.id].name != (hashedName{}) {
 			// slot is not free
 			return errBadId
 		}
@@ -115,7 +118,7 @@ func (p *pusher) handleElem(id int, val reflect.Value, ok bool) {
 	p.toEncoder <- element{id, val, ok}
 	if !ok {
 		// channel has been closed
-		p.table[id].present = false
+		p.table[id].name = hashedName{}
 		return
 	}
 	p.table[id].credit--
@@ -126,7 +129,7 @@ func (p *pusher) bigSelect() (int, reflect.Value, bool) {
 	p.cases = p.cases[:elemCase]
 	p.ids = p.ids[:elemCase]
 	for id, entry := range p.table {
-		if entry.present && entry.credit > 0 {
+		if entry.credit > 0 && entry.name != (hashedName{}) {
 			p.cases = append(p.cases, reflect.SelectCase{Dir: reflect.SelectRecv, Chan: entry.ch})
 			p.ids = append(p.ids, id)
 		}

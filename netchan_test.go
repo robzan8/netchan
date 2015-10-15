@@ -8,10 +8,17 @@ import (
 
 const smallBuf = 8
 
-func intProducer(man *Manager, chName string, n int) {
+func intProducer(t *testing.T, man *Manager, chName string, n int) {
+	go func() {
+		<-man.GotError()
+		t.Error(man.Error())
+	}()
 	go func() {
 		ch := make(chan int, smallBuf)
-		man.Push(ch, chName)
+		err := man.Push(ch, chName)
+		if err != nil {
+			t.Error(err)
+		}
 		for i := 0; i < n; i++ {
 			ch <- i
 		}
@@ -19,12 +26,19 @@ func intProducer(man *Manager, chName string, n int) {
 	}()
 }
 
-func intConsumer(man *Manager, chName string) <-chan []int {
+func intConsumer(t *testing.T, man *Manager, chName string) <-chan []int {
+	go func() {
+		<-man.GotError()
+		t.Error(man.Error())
+	}()
 	sliceCh := make(chan []int, 1)
 	go func() {
 		var slice []int
 		ch := make(chan int, smallBuf)
-		man.Pull(ch, chName)
+		err := man.Pull(ch, chName)
+		if err != nil {
+			t.Error(err)
+		}
 		for i := range ch {
 			slice = append(slice, i)
 		}
@@ -33,7 +47,7 @@ func intConsumer(man *Manager, chName string) <-chan []int {
 	return sliceCh
 }
 
-func checkIntSlice(s []int, t *testing.T) {
+func checkIntSlice(t *testing.T, s []int) {
 	for i, si := range s {
 		if i != si {
 			t.Errorf("expected i == s[i], found i == %d, s[i] == %d", i, si)
@@ -42,33 +56,20 @@ func checkIntSlice(s []int, t *testing.T) {
 	}
 }
 
-func checkError(man *Manager, t *testing.T) {
-	<-man.GotError()
-	t.Error(man.Error())
-}
-
 func TestPushThenPull(t *testing.T) {
 	conn := newConn()
-	manA := Manage(sideA(conn))
-	manB := Manage(sideB(conn))
-	go checkError(manA, t)
-	go checkError(manB, t)
-	intProducer(manA, "int chan", 100)
+	intProducer(t, Manage(sideA(conn)), "int chan", 100)
 	time.Sleep(50 * time.Millisecond)
-	s := <-intConsumer(manB, "int chan")
-	checkIntSlice(s, t)
+	s := <-intConsumer(t, Manage(sideB(conn)), "int chan")
+	checkIntSlice(t, s)
 }
 
 func TestPullThenPush(t *testing.T) {
 	conn := newConn()
-	manA := Manage(sideA(conn))
-	manB := Manage(sideB(conn))
-	go checkError(manA, t)
-	go checkError(manB, t)
-	sliceCh := intConsumer(manB, "int chan")
+	sliceCh := intConsumer(t, Manage(sideB(conn)), "int chan")
 	time.Sleep(50 * time.Millisecond)
-	intProducer(manA, "int chan", 100)
-	checkIntSlice(<-sliceCh, t)
+	intProducer(t, Manage(sideA(conn)), "int chan", 100)
+	checkIntSlice(t, <-sliceCh)
 }
 
 func TestManyChans(t *testing.T) {
@@ -80,15 +81,15 @@ func TestManyChans(t *testing.T) {
 		chName := "int chan" + strconv.Itoa(i)
 		if i%2 == 0 {
 			// producer is sideA, consumer is sideB
-			intProducer(manA, chName, 100)
-			sliceChs[i] = intConsumer(manB, chName)
+			intProducer(t, manA, chName, 100)
+			sliceChs[i] = intConsumer(t, manB, chName)
 		} else {
 			// producer is sideB, consumer is sideA
-			intProducer(manB, chName, 100)
-			sliceChs[i] = intConsumer(manA, chName)
+			intProducer(t, manB, chName, 100)
+			sliceChs[i] = intConsumer(t, manA, chName)
 		}
 	}
 	for _, ch := range sliceChs {
-		checkIntSlice(<-ch, t)
+		checkIntSlice(t, <-ch)
 	}
 }

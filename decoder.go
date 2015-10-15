@@ -55,6 +55,7 @@ func (d *decoder) run() {
 			elem.id = h.ChanId
 			d.types.Lock()
 			if elem.id >= len(d.types.table) {
+				d.types.Unlock()
 				raiseError(errBadId)
 			}
 			elemType := d.types.table[elem.id]
