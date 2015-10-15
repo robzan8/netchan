@@ -4,7 +4,6 @@ import (
 	"errors"
 	"reflect"
 	"sync"
-	"sync/atomic"
 )
 
 var (
@@ -13,14 +12,13 @@ var (
 )
 
 type pullEntry struct {
-	name    hashedName
-	buf     chan reflect.Value
-	present bool
+	name hashedName
+	buf  chan reflect.Value
 }
 
 type typeMap struct {
 	sync.Mutex
-	m map[hashedName]reflect.Type
+	table []reflect.Type
 }
 
 type puller struct {
@@ -34,18 +32,10 @@ type puller struct {
 	table []pullEntry
 }
 
-func (p *puller) initialize() {
-	p.table = make([]pullEntry, firstEntry)
-	// first #firstEntry entries are reserved
-	for i := range p.table {
-		p.table[i].present = true
-	}
-}
-
 func (p *puller) entryByName(name hashedName) *pullEntry {
-	for i := firstEntry; i < len(p.table); i++ {
-		if table[i].name == name {
-			return &table[i]
+	for i := range p.table {
+		if p.table[i].name == name {
+			return &p.table[i]
 		}
 	}
 	return nil
@@ -59,48 +49,48 @@ func (p *puller) add(ch reflect.Value, name hashedName) error {
 		return errAlreadyPulling
 	}
 	// get an id for the new channel
-	id := -1
-	for i := firstEntry; i < len(p.table); i++ {
-		if !table[i].present {
+	id := len(p.table)
+	for i := range p.table {
+		if p.table[i].buf == nil {
 			id = i
 			break
 		}
 	}
-	if id == -1 {
-		id := len(p.table)
-		p.table = append(p.table, pullEntry{})
-	}
-
 	buf := make(chan reflect.Value, bufCap)
-	p.table[id] = pullEntry{name, buf, true}
 	p.types.Lock()
-	p.types.m[name] = ch.Type().Elem()
+	if id == len(p.table) {
+		p.table = append(p.table, pullEntry{name, buf})
+		p.types.table = append(p.types.table, ch.Type().Elem())
+	} else {
+		p.table[id] = pullEntry{name, buf}
+		p.types.table[id] = ch.Type().Elem()
+	}
 	p.types.Unlock()
 
-	go bufferer(buf, ch, id, name, p.toEncoder)
+	go bufferer(id, name, buf, ch, p.toEncoder)
 	return nil
 }
 
 func (p *puller) handleElem(elem element) {
-	info := p.chans[elem.chName]
+	// id is good, decoder checked with p.types (if deleted/closed?)!
+	entry := &p.table[elem.id]
 	if !elem.ok { // netchan closed normally
-		close(info.buf)
-		delete(p.chans, elem.chName)
+		close(entry.buf)
+		entry.buf = nil
 		p.types.Lock()
-		delete(p.types.m, elem.chName)
+		p.types.table[elem.id] = nil
 		p.types.Unlock()
-		atomic.AddInt64(&p.count, -1)
 		return
 	}
-	if len(info.buf) == cap(info.buf) {
+	if len(entry.buf) == cap(entry.buf) {
 		p.man.signalError(errCredExceeded)
 		return
 	}
-	info.buf <- elem.val
+	entry.buf <- elem.val
 }
 
-func bufferer(buf <-chan reflect.Value, ch reflect.Value, id int, name hashedName, toEncoder chan<- credit) {
-	toEncoder <- credit{id, bufCap, true, name}
+func bufferer(id int, name hashedName, buf <-chan reflect.Value, ch reflect.Value, toEncoder chan<- credit) {
+	toEncoder <- credit{id, bufCap, true, &name}
 	sent := 0
 	for {
 		val, ok := <-buf
@@ -111,7 +101,7 @@ func bufferer(buf <-chan reflect.Value, ch reflect.Value, id int, name hashedNam
 		ch.Send(val)
 		sent++
 		if sent*2 >= bufCap { // i.e. sent >= ceil(bufCap/2)
-			toEncoder <- credit{id, sent, false, hashedName{}}
+			toEncoder <- credit{id, sent, false, nil}
 			sent = 0
 		}
 	}
@@ -125,7 +115,7 @@ func (p *puller) run() {
 		case elem, ok := <-p.elemCh:
 			if !ok {
 				// error occurred and decoder shut down
-				for _, info := range p.chans {
+				for _, info := range p.table {
 					close(info.buf)
 				}
 				close(p.toEncoder)

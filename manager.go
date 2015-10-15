@@ -2,6 +2,7 @@ package netchan
 
 import (
 	"crypto/sha1"
+	"encoding/gob"
 	"errors"
 	"io"
 	"reflect"
@@ -31,7 +32,7 @@ type credit struct {
 	id   int
 	incr int
 	open bool
-	name hashedName
+	name *hashedName
 }
 
 type Manager struct {
@@ -55,7 +56,7 @@ func Manage(conn io.ReadWriter) *Manager {
 	encCredCh := make(chan credit, chCap)
 	decElemCh := make(chan element, chCap)
 	decCredCh := make(chan credit, chCap)
-	types := &typeMap{m: make(map[hashedName]reflect.Type)}
+	types := new(typeMap)
 
 	m := &Manager{pushReq: pushReq, pullReq: pullReq, pushResp: pushResp, pullResp: pullResp}
 	m.err.Store((*error)(nil))
@@ -76,18 +77,14 @@ func Manage(conn io.ReadWriter) *Manager {
 		types:     types,
 		man:       m,
 	}
-	pull.initialize()
-	enc := &encoder{elemCh: encElemCh, creditCh: encCredCh, man: m}
-	enc.initialize(conn)
+	enc := &encoder{elemCh: encElemCh, creditCh: encCredCh, man: m, enc: gob.NewEncoder(conn)}
 	dec := &decoder{
-		toPuller:  decElemCh,
-		toPusher:  decCredCh,
-		pushCount: &push.count,
-		pullCount: &pull.count,
-		types:     types,
-		man:       m,
+		toPuller: decElemCh,
+		toPusher: decCredCh,
+		types:    types,
+		man:      m,
+		dec:      gob.NewDecoder(conn),
 	}
-	dec.initialize(conn)
 
 	go push.run()
 	go pull.run()
@@ -107,7 +104,7 @@ func (m *Manager) Push(channel interface{}, name string) error {
 		// pusher will not be able to receive from channel
 		panic(errBadPushChan)
 	}
-	m.pushReq <- addReq{ch, sha1.Sum([]byte(name))}
+	m.pushReq <- addReq{ch, hashName(name)}
 	select {
 	case err := <-m.pushResp:
 		return err
@@ -122,7 +119,7 @@ func (m *Manager) Pull(channel interface{}, name string) error {
 		// puller will not be able to send to channel
 		panic(errBadPullChan)
 	}
-	m.pullReq <- addReq{ch, sha1.Sum([]byte(name))}
+	m.pullReq <- addReq{ch, hashName(name)}
 	select {
 	case err := <-m.pullResp:
 		return err

@@ -3,7 +3,6 @@ package netchan
 import (
 	"errors"
 	"reflect"
-	"sync/atomic"
 )
 
 var (
@@ -16,10 +15,10 @@ const maxHalfOpen = 256
 const (
 	pushReqCase int = iota
 	creditCase
-	elemCase = 8 // reserve first 8 slots to other possible select cases
+	elemCase
 )
 
-type chanEntry struct {
+type pushEntry struct {
 	name    hashedName
 	ch      reflect.Value
 	credit  int
@@ -34,38 +33,40 @@ type pusher struct {
 	man       *Manager
 
 	pending  map[hashedName]reflect.Value
-	table    []chanEntry
+	table    []pushEntry
 	cases    []reflect.SelectCase
+	ids      []int
 	halfOpen int
 }
 
 func (p *pusher) initialize() {
+	p.pending = make(map[hashedName]reflect.Value)
 	p.cases = make([]reflect.SelectCase, elemCase)
 	p.cases[pushReqCase] = reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(p.pushReq)}
 	p.cases[creditCase] = reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(p.creditCh)}
-	p.names = make([]hashedName, elemCase)
+	p.ids = make([]int, elemCase)
 }
 
-func infoByName(table []chanEntry, name hashedName) *chanEntry {
-	for i := range table {
-		if table[i].name == name {
-			return &table[i]
+func (p *pusher) entryByName(name hashedName) *pushEntry {
+	for i := range p.table {
+		if p.table[i].name == name {
+			return &p.table[i]
 		}
 	}
 	return nil
 }
 
 func (p *pusher) add(ch reflect.Value, name hashedName) error {
-	info := infoByName
-	if present {
-		if p.table[id].ch != (reflect.Value{}) {
+	entry := p.entryByName(name)
+	if entry != nil {
+		if entry.ch != (reflect.Value{}) {
 			return errAlreadyPushing
 		}
-		p.table[id].ch = ch
+		entry.ch = ch
 		p.halfOpen--
 		return nil
 	}
-	_, present = p.pending[name]
+	_, present := p.pending[name]
 	if present {
 		return errAlreadyPushing
 	}
@@ -75,68 +76,59 @@ func (p *pusher) add(ch reflect.Value, name hashedName) error {
 
 func (p *pusher) handleCredit(cred credit) error {
 	if !cred.open {
-		if cred.id < 0 || cred.id >= len(p.chans) {
+		if cred.id >= len(p.table) {
 			return errBadId
 		}
-		if p.chans[cred.id] == (chanEntry{}) {
-			// probably the channel has just been removed,
-			// we must ignore the credit, increasing it makes
-			// it look like the channel is there
-			return nil
-		}
-		p.chans[cred.id].credit += cred.incr
+		p.table[cred.id].credit += cred.incr
 		return nil
 	}
 	// credit message wants to open a new channel
-	p.index[cred.name] = cred.id
-	info := chanEntry{credit: cred.incr}
-	ch, present := p.pending[cred.name]
+	entry := pushEntry{name: *cred.name, credit: cred.incr, present: true}
+	ch, present := p.pending[*cred.name]
 	if present {
-		info.ch = ch
-		delete(p.pending, cred.name)
+		entry.ch = ch
+		delete(p.pending, *cred.name)
 	} else {
 		p.halfOpen++
-		if halfOpen > maxHalfOpen {
+		if p.halfOpen > maxHalfOpen {
 			return errSynFlood
 		}
 	}
-	if cred.id == len(p.chans) {
+	if cred.id == len(p.table) {
 		// cred.id is a fresh slot
-		p.chans = append(p.chans, info)
+		p.table = append(p.table, entry)
 		return nil
 	}
-	if cred.id >= 0 && cred.id < len(p.chans) {
+	if cred.id < len(p.table) {
 		// cred.id is an old slot
-		if p.chans[cred.id].present {
+		if p.table[cred.id].present {
 			// slot is not free
 			return errBadId
 		}
-		p.chans[cred.id] = info
+		p.table[cred.id] = entry
 		return nil
 	}
 	return errBadId
 }
 
-func (p *pusher) handleElem(name hashedName, val reflect.Value, ok bool) {
-	p.toEncoder <- element{name, val, ok}
+func (p *pusher) handleElem(id int, val reflect.Value, ok bool) {
+	p.toEncoder <- element{id, val, ok}
 	if !ok {
-		delete(p.chans, name)
-		atomic.AddInt64(&p.count, -1)
+		// channel has been closed
+		p.table[id].present = false
 		return
 	}
-	info := p.chans[name]
-	info.credit--
-	p.chans[name] = info
+	p.table[id].credit--
 }
 
 func (p *pusher) bigSelect() (int, reflect.Value, bool) {
 	// generate select cases from active chans
 	p.cases = p.cases[:elemCase]
-	p.names = p.names[:elemCase]
-	for name, info := range p.chans {
-		if info.credit > 0 {
-			p.cases = append(p.cases, reflect.SelectCase{Dir: reflect.SelectRecv, Chan: info.ch})
-			p.names = append(p.names, name)
+	p.ids = p.ids[:elemCase]
+	for id, entry := range p.table {
+		if entry.present && entry.credit > 0 {
+			p.cases = append(p.cases, reflect.SelectCase{Dir: reflect.SelectRecv, Chan: entry.ch})
+			p.ids = append(p.ids, id)
 		}
 	}
 	return reflect.Select(p.cases)
@@ -160,7 +152,7 @@ func (p *pusher) run() {
 				p.man.signalError(err)
 			}
 		default: // i >= elemCase
-			p.handleElem(p.names[i], val, ok)
+			p.handleElem(p.ids[i], val, ok)
 		}
 	}
 }

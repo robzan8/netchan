@@ -42,19 +42,32 @@ func checkIntSlice(s []int, t *testing.T) {
 	}
 }
 
+func checkError(man *Manager, t *testing.T) {
+	<-man.GotError()
+	t.Error(man.Error())
+}
+
 func TestPushThenPull(t *testing.T) {
 	conn := newConn()
-	intProducer(Manage(sideA(conn)), "int chan", 100)
+	manA := Manage(sideA(conn))
+	manB := Manage(sideB(conn))
+	go checkError(manA, t)
+	go checkError(manB, t)
+	intProducer(manA, "int chan", 100)
 	time.Sleep(50 * time.Millisecond)
-	s := <-intConsumer(Manage(sideB(conn)), "int chan")
+	s := <-intConsumer(manB, "int chan")
 	checkIntSlice(s, t)
 }
 
 func TestPullThenPush(t *testing.T) {
 	conn := newConn()
-	sliceCh := intConsumer(Manage(sideB(conn)), "int chan")
+	manA := Manage(sideA(conn))
+	manB := Manage(sideB(conn))
+	go checkError(manA, t)
+	go checkError(manB, t)
+	sliceCh := intConsumer(manB, "int chan")
 	time.Sleep(50 * time.Millisecond)
-	intProducer(Manage(sideA(conn)), "int chan", 100)
+	intProducer(manA, "int chan", 100)
 	checkIntSlice(<-sliceCh, t)
 }
 
