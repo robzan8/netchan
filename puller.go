@@ -12,9 +12,10 @@ var (
 )
 
 type pullEntry struct {
-	name    hashedName
-	ch      reflect.Value
-	present uint64
+	name     hashedName
+	ch       reflect.Value
+	received int
+	present  int
 }
 
 type pullTable struct {
@@ -103,30 +104,6 @@ func (p *puller) handleElem(elem element) error {
 	}
 	entry.buf <- elem.val
 	return nil
-}
-
-func bufferer(id int, name hashedName, buf <-chan reflect.Value, ch reflect.Value, toEncoder chan<- credit) {
-	sent := 0
-	for {
-		val, ok := <-buf
-		if !ok {
-			ch.Close()
-			return
-		}
-		ch.Send(val)
-		sent++
-		cred := credit{id, sent, false, nil}
-		if sent == bufCap {
-			toEncoder <- cred
-			sent = 0
-		} else if sent*2 >= bufCap { // i.e. sent >= ceil(bufCap/2)
-			select {
-			case toEncoder <- cred:
-				sent = 0
-			default:
-			}
-		}
-	}
 }
 
 func (p *puller) run() {

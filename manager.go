@@ -30,8 +30,7 @@ type element struct {
 
 type credit struct {
 	id   int
-	incr int
-	open bool
+	incr uint64
 	name *hashedName
 }
 

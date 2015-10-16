@@ -19,9 +19,10 @@ const (
 )
 
 type pushEntry struct {
-	name   hashedName
-	ch     reflect.Value
-	credit int
+	name    hashedName
+	ch      reflect.Value
+	credit  int64
+	padding int64
 }
 
 type pusher struct {
