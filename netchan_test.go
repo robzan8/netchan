@@ -76,10 +76,10 @@ func TestManyChans(t *testing.T) {
 	conn := newConn()
 	manA := Manage(sideA(conn))
 	manB := Manage(sideB(conn))
-	var sliceChs [100]<-chan []int
+	var sliceChs [8]<-chan []int
 	for i := range sliceChs {
 		chName := "int chan" + strconv.Itoa(i)
-		if i%2 == 0 || true {
+		if i%2 == 0 || true { //!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 			// producer is sideA, consumer is sideB
 			intProducer(t, manA, chName, 100)
 			sliceChs[i] = intConsumer(t, manB, chName)

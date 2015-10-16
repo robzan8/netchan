@@ -109,9 +109,16 @@ func bufferer(id int, name hashedName, buf <-chan reflect.Value, ch reflect.Valu
 		}
 		ch.Send(val)
 		sent++
-		if sent*2 >= bufCap { // i.e. sent >= ceil(bufCap/2)
-			toEncoder <- credit{id, sent, false, nil}
+		cred := credit{id, sent, false, nil}
+		if sent == bufCap {
+			toEncoder <- cred
 			sent = 0
+		} else if sent*2 >= bufCap { // i.e. sent >= ceil(bufCap/2)
+			select {
+			case toEncoder <- cred:
+				sent = 0
+			default:
+			}
 		}
 	}
 }

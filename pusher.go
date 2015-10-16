@@ -114,14 +114,14 @@ func (p *pusher) handleCredit(cred credit) error {
 	return errBadId
 }
 
-func (p *pusher) handleElem(id int, val reflect.Value, ok bool) {
-	p.toEncoder <- element{id, val, ok}
-	if !ok {
+func (p *pusher) handleElem(elem element) {
+	p.toEncoder <- elem
+	if !elem.ok {
 		// channel has been closed
-		p.table[id].name = hashedName{}
+		p.table[elem.id].name = hashedName{}
 		return
 	}
-	p.table[id].credit--
+	p.table[elem.id].credit--
 }
 
 func (p *pusher) bigSelect() (int, reflect.Value, bool) {
@@ -155,7 +155,7 @@ func (p *pusher) run() {
 				p.man.signalError(err)
 			}
 		default: // i >= elemCase
-			p.handleElem(p.ids[i], val, ok)
+			p.handleElem(element{p.ids[i], val, ok})
 		}
 	}
 }
