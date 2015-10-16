@@ -12,8 +12,14 @@ var (
 )
 
 type pullEntry struct {
-	name hashedName
-	buf  chan reflect.Value
+	name    hashedName
+	ch      reflect.Value
+	present uint64
+}
+
+type pullTable struct {
+	sync.RWMutex
+	t []pullEntry
 }
 
 type typeMap struct {
