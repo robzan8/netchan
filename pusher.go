@@ -10,36 +10,32 @@ import (
 
 var (
 	errAlreadyPushing = errors.New("netchan pusher: Manager.Push called with channel name already present")
+	errOldIdsUnused   = errors.New("netchan pusher: peer keeps using fresh ids instead of old ones")
 	errSynFlood       = errors.New("netchan pusher: too many half open push requests")
 )
 
-const maxHalfOpen = 256
+const (
+	maxHalfOpen = 256
+	maxHoles    = 256
+)
 
 type pushEntry struct {
-	name   hashedName
-	ch     reflect.Value
-	credit int64
-	_      int64 // padding
-}
-
-func (e *pushEntry) isPresent() bool {
-	return e.name != hashedName{}
-}
-
-func (e *pushEntry) delete() {
-	e.name = hashedName{}
+	name    hashedName
+	present bool
+	ch      reflect.Value
+	credit  int64
+	_       int64 // padding
 }
 
 type pushTable struct {
 	sync.RWMutex
-	t []pushEntry
+	t       []pushEntry
+	pending map[hashedName]reflect.Value
 }
 
 type pusher struct {
 	toEncoder chan<- element
-	pending   map[hashedName]reflect.Value
 	table     *pushTable
-	halfOpen  *int64
 	man       *Manager
 
 	cases []reflect.SelectCase
@@ -54,7 +50,7 @@ func (p *pusher) initialize() {
 func (p *pusher) entryByName(name hashedName) *pushEntry {
 	for i := range p.table.t {
 		entry := &p.table.t[i]
-		if entry.name == name {
+		if entry.present && entry.name == name {
 			return entry
 		}
 	}
@@ -71,64 +67,58 @@ func (p *pusher) add(ch reflect.Value, name hashedName) error {
 			return errAlreadyPushing
 		}
 		entry.ch = ch
-		p.halfOpen--
 		return nil
 	}
-	_, present := p.pending[name]
+	_, present := p.table.pending[name]
 	if present {
 		return errAlreadyPushing
 	}
-	p.pending[name] = ch
+	p.table.pending[name] = ch
 	return nil
-}
-
-func (p *pusher) handleElem(elem element) {
-	p.toEncoder <- elem
-	entry := &p.table[elem.id]
-	if !elem.ok {
-		// channel has been closed
-		entry.delete()
-		return
-	}
-	atomic.AddInt64(&entry.credit, -1)
-}
-
-func (p *pusher) bigSelect() (int, reflect.Value, bool) {
-	// generate select cases from active chans
-	p.cases = p.cases[:1]
-	p.ids = p.ids[:1]
-	for id := range p.table.t {
-		entry := &p.table.t[id]
-		if !entry.isPresent() {
-			continue
-		}
-		cred := atomic.LoadInt64(&entry.credit)
-		if cred > 0 {
-			p.cases = append(p.cases, reflect.SelectCase{Dir: reflect.SelectRecv, Chan: entry.ch})
-			p.ids = append(p.ids, id)
-		}
-	}
-	return reflect.Select(p.cases)
 }
 
 func (p *pusher) run() {
 	for p.man.Error() == nil {
-		i, val, ok := p.bigSelect()
+		p.table.RLock()
+		p.cases = p.cases[:1]
+		p.ids = p.ids[:1]
+		for id := range p.table.t {
+			entry := &p.table.t[id]
+			cred := atomic.LoadInt64(&entry.credit)
+			if entry.present && cred > 0 {
+				p.cases = append(p.cases, reflect.SelectCase{Dir: reflect.SelectRecv, Chan: entry.ch})
+				p.ids = append(p.ids, id)
+			}
+		}
+		i, val, ok := reflect.Select(p.cases)
 		switch {
 		case i > 0:
-			p.handleElem(element{p.ids[i], val, ok})
+			id := p.ids[i]
+			atomic.AddInt64(&p.table.t[id].credit, -1)
+			p.table.RUnlock()
+			p.toEncoder <- element{id, val, ok}
+			if !ok {
+				// channel has been closed;
+				// an initial credit may arrive in this moment and add a new
+				// entry in the table, possibly triggering a whole reallocation of
+				// the underlying array, but our id will remain the same and
+				// our entry will be untouched.
+				p.table.Lock()
+				p.table.t[id] = pushEntry{}
+				p.table.Unlock()
+			}
+			// handleElem does table.RUnlock()
 		default:
+			p.table.RUnlock()
 			time.Sleep(1 * time.Millisecond)
 		}
 	}
-	close(toEncoder)
+	close(p.toEncoder)
 }
 
 type credPuller struct {
 	creditCh <-chan credit
 	table    *pushTable
-	pending  map[hashedName]reflect.Value
-	halfOpen *int64
 	man      *Manager
 }
 
@@ -152,46 +142,59 @@ func (p *credPuller) run() {
 }
 
 func (p *credPuller) handleCred(cred credit) error {
+	p.table.RLock()
 	if cred.id >= len(p.table.t) {
+		p.table.RUnlock()
 		return errBadId
 	}
-	entry := &p.table.t[cred.id]
-	if !isPresent(entry) {
-		// credit to deleted channel, ignore
-		return nil
-	}
-	atomic.AddInt64(&entry.credit, cred.incr)
+	// it may happen that the entry is not present, because the channel
+	// has just been closed; increasing the credit doesn't do any damage
+	atomic.AddInt64(&p.table.t[cred.id].credit, cred.incr)
+	p.table.RUnlock()
 	return nil
 }
 
-func handleInitCred(cred credit) error {
+func (p *credPuller) handleInitCred(cred credit) error {
 	p.table.Lock()
 	defer p.table.Unlock()
 
-	entry := pushEntry{name: *cred.name, credit: cred.incr}
-	ch, present := p.pending[*cred.name]
+	entry := pushEntry{name: *cred.name, present: true, credit: cred.incr}
+	ch, present := p.table.pending[*cred.name]
 	if present {
 		entry.ch = ch
-		delete(p.pending, *cred.name)
+		delete(p.table.pending, *cred.name)
 	} else {
-		p.halfOpen++
-		if p.halfOpen > maxHalfOpen {
+		halfOpen := 0
+		for _, e := range p.table.t {
+			if e.present && e.ch == (reflect.Value{}) {
+				halfOpen++
+			}
+		}
+		if halfOpen > maxHalfOpen {
 			return errSynFlood
 		}
 	}
-	if cred.id == len(p.table) {
+	if cred.id == len(p.table.t) {
 		// cred.id is a fresh slot
-		// check here if too many holes, throw an error
-		p.table = append(p.table, entry)
+		holes := 0
+		for _, e := range p.table.t {
+			if !e.present {
+				holes++
+			}
+		}
+		if holes > maxHoles {
+			return errOldIdsUnused
+		}
+		p.table.t = append(p.table.t, entry)
 		return nil
 	}
-	if cred.id < len(p.table) {
+	if cred.id < len(p.table.t) {
 		// cred.id is an old slot
-		if isPresent(p.table.t[cred.id]) {
+		if p.table.t[cred.id].present {
 			// slot is not free
 			return errBadId
 		}
-		p.table[cred.id] = entry
+		p.table.t[cred.id] = entry
 		return nil
 	}
 	return errBadId

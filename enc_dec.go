@@ -6,6 +6,72 @@ import (
 	"reflect"
 )
 
+type msgType int
+
+const (
+	_ msgType = iota
+	elemMsg
+	creditMsg
+	errorMsg
+)
+
+type header struct {
+	MsgType msgType
+	ChanId  int
+}
+
+type encoder struct {
+	elemCh   <-chan element // from pusher
+	creditCh <-chan credit  // from puller
+	man      *Manager
+
+	enc *gob.Encoder
+	err error
+}
+
+func (e *encoder) encodeVal(v reflect.Value) {
+	if e.err != nil {
+		return
+	}
+	e.err = e.enc.EncodeValue(v)
+	if e.err != nil {
+		e.man.signalError(e.err)
+	}
+}
+
+func (e *encoder) encode(v interface{}) {
+	e.encodeVal(reflect.ValueOf(v))
+}
+
+func (e *encoder) run() {
+	for e.elemCh != nil || e.creditCh != nil {
+		select {
+		case elem, ok := <-e.elemCh:
+			if ok {
+				e.encode(header{elemMsg, elem.id})
+				e.encodeVal(elem.val)
+				e.encode(elem.ok)
+			} else {
+				e.elemCh = nil
+			}
+
+		case cred, ok := <-e.creditCh:
+			if ok {
+				e.encode(header{creditMsg, cred.id})
+				e.encode(cred.incr)
+				e.encode(cred.name != nil)
+				if cred.name != nil {
+					e.encode(cred.name)
+				}
+			} else {
+				e.creditCh = nil
+			}
+		}
+	}
+	e.encode(header{errorMsg, -1})
+	e.encode(e.man.Error().Error())
+}
+
 var (
 	errBadId          = errors.New("netchan decoder: out of bounds id received")
 	errInvalidMsgType = errors.New("netchan decoder: message with invalid type received")
@@ -22,10 +88,10 @@ func raiseError(err error) {
 }
 
 type decoder struct {
-	toPuller chan<- element
-	toPusher chan<- credit
-	types    *typeMap
-	man      *Manager
+	toPuller  chan<- element
+	toCPuller chan<- credit
+	table     *pullTable
+	man       *Manager
 
 	dec *gob.Decoder
 }
@@ -53,16 +119,13 @@ func (d *decoder) run() {
 		case elemMsg:
 			var elem element
 			elem.id = h.ChanId
-			d.types.Lock()
-			if elem.id >= len(d.types.table) {
-				d.types.Unlock()
+			d.table.RLock()
+			if elem.id >= len(d.table.t) || !d.table.t[elem.id].present {
+				d.table.RUnlock()
 				raiseError(errBadId)
 			}
-			elemType := d.types.table[elem.id]
-			d.types.Unlock()
-			if elemType == nil {
-				raiseError(errBadId)
-			}
+			elemType := d.table.t[elem.id].ch.Type().Elem()
+			d.table.RUnlock()
 			elem.val = reflect.New(elemType).Elem()
 			d.decodeVal(elem.val)
 			d.decode(&elem.ok)
@@ -72,12 +135,13 @@ func (d *decoder) run() {
 			var cred credit
 			cred.id = h.ChanId
 			d.decode(&cred.incr)
-			d.decode(&cred.open)
-			if cred.open {
+			var isInit bool
+			d.decode(&isInit)
+			if isInit {
 				cred.name = new(hashedName)
 				d.decode(cred.name)
 			}
-			d.toPusher <- cred
+			d.toCPuller <- cred
 
 		case errorMsg:
 			var errString string
@@ -85,6 +149,7 @@ func (d *decoder) run() {
 			raiseError(errors.New(errString))
 
 		default:
+			// more resilient?
 			raiseError(errInvalidMsgType)
 		}
 
@@ -103,6 +168,6 @@ func (d *decoder) shutDown() {
 		panic(e)
 	}
 	d.man.signalError(decErr.err)
-	close(d.toPusher)
 	close(d.toPuller)
+	close(d.toCPuller)
 }

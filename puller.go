@@ -14,19 +14,12 @@ var (
 )
 
 type pullEntry struct {
-	name  hashedName
-	ch    reflect.Value
-	chCap int64
-	// quando puller butta un elemento nel buffer, incrementa received
+	name     hashedName
+	present  bool
+	init     bool
+	ch       reflect.Value
+	chCap    int64
 	received int64
-}
-
-func (e *pullEntry) isPresent() bool {
-	return e.name != hashedName{}
-}
-
-func (e *pullEntry) delete() {
-	e.name = hashedName{}
 }
 
 type pullTable struct {
@@ -52,42 +45,50 @@ func (p *puller) add(ch reflect.Value, name hashedName) error {
 	// get an id for the new channel
 	id := len(p.table.t)
 	for i := range p.table.t {
-		if !(&p.table.t[i]).isPresent() {
+		if !p.table.t[i].present {
 			id = i
 			break
 		}
 	}
 	chCap := int64(ch.Cap())
-	entry := pullEntry{name, ch, chCap, 0}
+	entry := pullEntry{name, true, true, ch, chCap, 0}
 	if id == len(p.table.t) {
-		p.table = append(p.table, entry)
+		p.table.t = append(p.table.t, entry)
 	} else {
 		p.table.t[id] = entry
 	}
-
-	p.toEncoder <- credit{id, chCap, &name} // nooooooooooooooo
 	return nil
 }
 
 func (p *puller) handleElem(elem element) error {
+	p.table.RLock()
 	if elem.id >= len(p.table.t) {
+		p.table.RUnlock()
 		return errBadId
 	}
-	entry := &p.table.t[elem.id]
-	if !entry.isPresent() {
+	if !p.table.t[elem.id].present {
+		p.table.RUnlock()
 		return errBadId
 	}
 	if !elem.ok { // netchan closed normally
+		p.table.RUnlock()
+		// table array can be reallocated here
 		p.table.Lock()
+		entry := &p.table.t[elem.id]
 		entry.ch.Close()
-		entry.delete()
+		*entry = pullEntry{}
 		p.table.Unlock()
 		return nil
 	}
+	entry := &p.table.t[elem.id]
 	if entry.ch.Len() == entry.ch.Cap() {
+		p.table.RUnlock()
 		return errCredExceeded
 	}
+	// do not swap the next two lines
 	entry.ch.Send(elem.val)
+	atomic.AddInt64(&entry.received, 1)
+	p.table.RUnlock()
 	return nil
 }
 
@@ -96,9 +97,11 @@ func (p *puller) run() {
 		elem, ok := <-p.elemCh
 		if !ok {
 			// error occurred and decoder shut down
+			p.table.Lock()
 			for _, entry := range p.table.t {
 				entry.ch.Close()
 			}
+			p.table.Unlock()
 			return
 		}
 		err := p.handleElem(elem)
@@ -111,20 +114,20 @@ func (p *puller) run() {
 type credPusher struct {
 	toEncoder chan<- credit
 	table     *pullTable
-	credits   []credit
 	man       *Manager
+
+	credits []credit
 }
 
 func (p *credPusher) run() {
 	for p.man.Error() == nil {
-		time.Sleep(1 * time.Millisecond)
-
 		p.updateCredits()
-		for _, cred := range credits {
-			toEncoder <- cred
+		for _, cred := range p.credits {
+			p.toEncoder <- cred
 		}
+		time.Sleep(1 * time.Millisecond)
 	}
-	close(toEncoder)
+	close(p.toEncoder)
 }
 
 func (p *credPusher) updateCredits() {
@@ -132,17 +135,20 @@ func (p *credPusher) updateCredits() {
 	p.credits = p.credits[:0]
 	for id := range p.table.t {
 		entry := &p.table.t[id]
-		if !isPresent(entry) {
+		if !entry.present {
 			continue
 		}
 		// do not swap the next two lines
 		received := atomic.LoadInt64(&entry.received)
 		chLen := int64(entry.ch.Len())
 		consumed := received - chLen
-		if consumed*2 >= entry.chCap { // i.e. consumed >= ceil(chCap/2)
+		if entry.init {
+			p.credits = append(p.credits, credit{id, entry.chCap, &entry.name})
+			entry.init = false
+		} else if consumed*2 >= entry.chCap { // i.e. consumed >= ceil(chCap/2)
 			p.credits = append(p.credits, credit{id, consumed, nil})
 			atomic.AddInt64(&entry.received, -consumed)
 		}
 	}
-	table.RUnlock()
+	p.table.RUnlock()
 }

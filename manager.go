@@ -30,15 +30,13 @@ type element struct {
 
 type credit struct {
 	id   int
-	incr uint64
+	incr int64
 	name *hashedName
 }
 
 type Manager struct {
-	pushReq  chan<- addReq
-	pullReq  chan<- addReq
-	pushResp <-chan error
-	pullResp <-chan error
+	push *pusher
+	pull *puller
 
 	errMu  sync.Mutex
 	err    atomic.Value // *error
@@ -46,83 +44,62 @@ type Manager struct {
 }
 
 func Manage(conn io.ReadWriter) *Manager {
-	const chCap int = 8
-	pushReq := make(chan addReq) // these must be unbuffered
-	pullReq := make(chan addReq)
-	pushResp := make(chan error)
-	pullResp := make(chan error)
-	encElemCh := make(chan element, chCap)
-	encCredCh := make(chan credit, chCap)
-	decElemCh := make(chan element, chCap)
-	decCredCh := make(chan credit, chCap)
-	types := new(typeMap)
-
-	m := &Manager{pushReq: pushReq, pullReq: pullReq, pushResp: pushResp, pullResp: pullResp}
+	push := new(pusher)
+	pull := new(puller)
+	m := &Manager{push: push, pull: pull}
 	m.err.Store((*error)(nil))
 	m.gotErr = make(chan struct{})
-	push := &pusher{
-		toEncoder: encElemCh,
-		creditCh:  decCredCh,
-		pushReq:   pushReq,
-		pushResp:  pushResp,
-		man:       m,
-	}
+
+	const chCap int = 8
+	pushElemCh := make(chan element, chCap)
+	pullCredCh := make(chan credit, chCap)
+	pushTab := &pushTable{pending: make(map[hashedName]reflect.Value)}
+	*push = pusher{toEncoder: pushElemCh, table: pushTab, man: m}
 	push.initialize()
-	pull := &puller{
-		elemCh:    decElemCh,
-		toEncoder: encCredCh,
-		pullReq:   pullReq,
-		pullResp:  pullResp,
-		types:     types,
-		man:       m,
-	}
-	enc := &encoder{elemCh: encElemCh, creditCh: encCredCh, man: m, enc: gob.NewEncoder(conn)}
-	dec := &decoder{
-		toPuller: decElemCh,
-		toPusher: decCredCh,
-		types:    types,
-		man:      m,
-		dec:      gob.NewDecoder(conn),
-	}
+	cPull := &credPuller{creditCh: pullCredCh, table: pushTab, man: m}
+
+	pullElemCh := make(chan element, chCap)
+	pushCredCh := make(chan credit, chCap)
+	pullTab := new(pullTable)
+	*pull = puller{elemCh: pullElemCh, table: pullTab, man: m}
+	cPush := &credPusher{toEncoder: pushCredCh, table: pullTab, man: m}
+
+	enc := &encoder{elemCh: pushElemCh, creditCh: pushCredCh, man: m}
+	enc.enc = gob.NewEncoder(conn)
+	dec := &decoder{toPuller: pullElemCh, toCPuller: pullCredCh, table: pullTab, man: m}
+	dec.dec = gob.NewDecoder(conn)
 
 	go push.run()
 	go pull.run()
+	go cPush.run()
+	go cPull.run()
 	go enc.run()
 	go dec.run()
 	return m
 }
 
-type addReq struct { // request for adding (ch, name) to pusher or puller
-	ch   reflect.Value
-	name hashedName
-}
-
-func (m *Manager) pushEntryByName(name hashedName) *pushEntry {
-	for i := range m.pushTable.t {
-		entry := &m.pushTable.t[i]
-		if entry.name == name {
-			return entry
-		}
-	}
-	return nil
+func checkChan(ch reflect.Value, dir reflect.ChanDir) bool {
+	return ch.Kind() == reflect.Chan &&
+		ch.Cap() > 0 &&
+		ch.Type().ChanDir()&dir != 0
 }
 
 func (m *Manager) Push(channel interface{}, name string) error {
 	ch := reflect.ValueOf(channel)
-	if ch.Kind() != reflect.Chan || ch.Type().ChanDir()&reflect.RecvDir == 0 {
+	if !checkChan(ch, reflect.RecvDir) {
 		// pusher will not be able to receive from channel
 		panic(errBadPushChan)
 	}
-	return m.push.add(ch, name)
+	return m.push.add(ch, hashName(name))
 }
 
 func (m *Manager) Pull(channel interface{}, name string) error {
 	ch := reflect.ValueOf(channel)
-	if ch.Kind() != reflect.Chan || ch.Type().ChanDir()&reflect.SendDir == 0 {
+	if !checkChan(ch, reflect.SendDir) {
 		// puller will not be able to send to channel
 		panic(errBadPullChan)
 	}
-	return m.pull.add(ch, name)
+	return m.pull.add(ch, hashName(name))
 }
 
 func (m *Manager) signalError(err error) {
