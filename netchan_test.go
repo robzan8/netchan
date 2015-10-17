@@ -7,6 +7,7 @@ import (
 )
 
 const smallBuf = 8
+const bigBuf = 16
 
 func intProducer(t *testing.T, man *Manager, chName string, n int) {
 	go func() {
@@ -34,7 +35,7 @@ func intConsumer(t *testing.T, man *Manager, chName string) <-chan []int {
 	sliceCh := make(chan []int, 1)
 	go func() {
 		var slice []int
-		ch := make(chan int, smallBuf)
+		ch := make(chan int, bigBuf)
 		err := man.Pull(ch, chName)
 		if err != nil {
 			t.Error(err)
@@ -92,4 +93,11 @@ func TestManyChans(t *testing.T) {
 	for _, ch := range sliceChs {
 		checkIntSlice(t, <-ch)
 	}
+}
+
+func TestCredits(t *testing.T) {
+	conn := newConn()
+	intProducer(t, Manage(sideA(conn)), "int chan", 50000)
+	s := <-intConsumer(t, Manage(sideB(conn)), "int chan")
+	checkIntSlice(t, s)
 }

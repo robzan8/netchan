@@ -110,7 +110,7 @@ func (p *pusher) run() {
 			// handleElem does table.RUnlock()
 		default:
 			p.table.RUnlock()
-			time.Sleep(1 * time.Millisecond)
+			time.Sleep(10 * time.Millisecond)
 		}
 	}
 	close(p.toEncoder)

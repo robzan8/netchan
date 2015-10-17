@@ -125,7 +125,7 @@ func (p *credPusher) run() {
 		for _, cred := range p.credits {
 			p.toEncoder <- cred
 		}
-		time.Sleep(1 * time.Millisecond)
+		time.Sleep(10 * time.Millisecond)
 	}
 	close(p.toEncoder)
 }
