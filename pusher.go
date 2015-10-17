@@ -3,6 +3,9 @@ package netchan
 import (
 	"errors"
 	"reflect"
+	"sync"
+	"sync/atomic"
+	"time"
 )
 
 var (
@@ -12,51 +15,56 @@ var (
 
 const maxHalfOpen = 256
 
-const (
-	pushReqCase int = iota
-	creditCase
-	elemCase
-)
-
 type pushEntry struct {
-	name    hashedName
-	ch      reflect.Value
-	credit  int64
-	padding int64
+	name   hashedName
+	ch     reflect.Value
+	credit int64
+	_      int64 // padding
+}
+
+func (e *pushEntry) isPresent() bool {
+	return e.name != hashedName{}
+}
+
+func (e *pushEntry) delete() {
+	e.name = hashedName{}
+}
+
+type pushTable struct {
+	sync.RWMutex
+	t []pushEntry
 }
 
 type pusher struct {
 	toEncoder chan<- element
-	creditCh  <-chan credit // from decoder
-	pushReq   <-chan addReq
-	pushResp  chan<- error
+	pending   map[hashedName]reflect.Value
+	table     *pushTable
+	halfOpen  *int64
 	man       *Manager
 
-	pending  map[hashedName]reflect.Value
-	table    []pushEntry
-	cases    []reflect.SelectCase
-	ids      []int
-	halfOpen int
+	cases []reflect.SelectCase
+	ids   []int
 }
 
 func (p *pusher) initialize() {
-	p.pending = make(map[hashedName]reflect.Value)
-	p.cases = make([]reflect.SelectCase, elemCase)
-	p.cases[pushReqCase] = reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(p.pushReq)}
-	p.cases[creditCase] = reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(p.creditCh)}
-	p.ids = make([]int, elemCase)
+	p.cases = []reflect.SelectCase{reflect.SelectCase{Dir: reflect.SelectDefault}}
+	p.ids = []int{-1}
 }
 
 func (p *pusher) entryByName(name hashedName) *pushEntry {
-	for i := range p.table {
-		if p.table[i].name == name {
-			return &p.table[i]
+	for i := range p.table.t {
+		entry := &p.table.t[i]
+		if entry.name == name {
+			return entry
 		}
 	}
 	return nil
 }
 
 func (p *pusher) add(ch reflect.Value, name hashedName) error {
+	p.table.Lock()
+	defer p.table.Unlock()
+
 	entry := p.entryByName(name)
 	if entry != nil {
 		if entry.ch != (reflect.Value{}) {
@@ -74,19 +82,92 @@ func (p *pusher) add(ch reflect.Value, name hashedName) error {
 	return nil
 }
 
-func (p *pusher) handleCredit(cred credit) error {
-	if !cred.open {
-		if cred.id >= len(p.table) {
-			return errBadId
+func (p *pusher) handleElem(elem element) {
+	p.toEncoder <- elem
+	entry := &p.table[elem.id]
+	if !elem.ok {
+		// channel has been closed
+		entry.delete()
+		return
+	}
+	atomic.AddInt64(&entry.credit, -1)
+}
+
+func (p *pusher) bigSelect() (int, reflect.Value, bool) {
+	// generate select cases from active chans
+	p.cases = p.cases[:1]
+	p.ids = p.ids[:1]
+	for id := range p.table.t {
+		entry := &p.table.t[id]
+		if !entry.isPresent() {
+			continue
 		}
-		if p.table[cred.id].name == (hashedName{}) {
-			// credit to deleted channel, ignore
-			return nil
+		cred := atomic.LoadInt64(&entry.credit)
+		if cred > 0 {
+			p.cases = append(p.cases, reflect.SelectCase{Dir: reflect.SelectRecv, Chan: entry.ch})
+			p.ids = append(p.ids, id)
 		}
-		p.table[cred.id].credit += cred.incr
+	}
+	return reflect.Select(p.cases)
+}
+
+func (p *pusher) run() {
+	for p.man.Error() == nil {
+		i, val, ok := p.bigSelect()
+		switch {
+		case i > 0:
+			p.handleElem(element{p.ids[i], val, ok})
+		default:
+			time.Sleep(1 * time.Millisecond)
+		}
+	}
+	close(toEncoder)
+}
+
+type credPuller struct {
+	creditCh <-chan credit
+	table    *pushTable
+	pending  map[hashedName]reflect.Value
+	halfOpen *int64
+	man      *Manager
+}
+
+func (p *credPuller) run() {
+	for {
+		cred, ok := <-p.creditCh
+		if !ok {
+			// error occurred and decoder shut down
+			return
+		}
+		var err error
+		if cred.name == nil {
+			err = p.handleCred(cred)
+		} else {
+			err = p.handleInitCred(cred)
+		}
+		if err != nil {
+			p.man.signalError(err)
+		}
+	}
+}
+
+func (p *credPuller) handleCred(cred credit) error {
+	if cred.id >= len(p.table.t) {
+		return errBadId
+	}
+	entry := &p.table.t[cred.id]
+	if !isPresent(entry) {
+		// credit to deleted channel, ignore
 		return nil
 	}
-	// credit message wants to open a new channel
+	atomic.AddInt64(&entry.credit, cred.incr)
+	return nil
+}
+
+func handleInitCred(cred credit) error {
+	p.table.Lock()
+	defer p.table.Unlock()
+
 	entry := pushEntry{name: *cred.name, credit: cred.incr}
 	ch, present := p.pending[*cred.name]
 	if present {
@@ -100,12 +181,13 @@ func (p *pusher) handleCredit(cred credit) error {
 	}
 	if cred.id == len(p.table) {
 		// cred.id is a fresh slot
+		// check here if too many holes, throw an error
 		p.table = append(p.table, entry)
 		return nil
 	}
 	if cred.id < len(p.table) {
 		// cred.id is an old slot
-		if p.table[cred.id].name != (hashedName{}) {
+		if isPresent(p.table.t[cred.id]) {
 			// slot is not free
 			return errBadId
 		}
@@ -113,50 +195,4 @@ func (p *pusher) handleCredit(cred credit) error {
 		return nil
 	}
 	return errBadId
-}
-
-func (p *pusher) handleElem(elem element) {
-	p.toEncoder <- elem
-	if !elem.ok {
-		// channel has been closed
-		p.table[elem.id].name = hashedName{}
-		return
-	}
-	p.table[elem.id].credit--
-}
-
-func (p *pusher) bigSelect() (int, reflect.Value, bool) {
-	// generate select cases from active chans
-	p.cases = p.cases[:elemCase]
-	p.ids = p.ids[:elemCase]
-	for id, entry := range p.table {
-		if entry.credit > 0 && entry.name != (hashedName{}) {
-			p.cases = append(p.cases, reflect.SelectCase{Dir: reflect.SelectRecv, Chan: entry.ch})
-			p.ids = append(p.ids, id)
-		}
-	}
-	return reflect.Select(p.cases)
-}
-
-func (p *pusher) run() {
-	for {
-		i, val, ok := p.bigSelect()
-		switch i {
-		case pushReqCase:
-			req := val.Interface().(addReq)
-			p.pushResp <- p.add(req.ch, req.name)
-		case creditCase:
-			if !ok {
-				// error occurred and decoder shut down
-				close(p.toEncoder)
-				return
-			}
-			err := p.handleCredit(val.Interface().(credit))
-			if err != nil {
-				p.man.signalError(err)
-			}
-		default: // i >= elemCase
-			p.handleElem(element{p.ids[i], val, ok})
-		}
-	}
 }

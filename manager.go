@@ -97,19 +97,23 @@ type addReq struct { // request for adding (ch, name) to pusher or puller
 	name hashedName
 }
 
+func (m *Manager) pushEntryByName(name hashedName) *pushEntry {
+	for i := range m.pushTable.t {
+		entry := &m.pushTable.t[i]
+		if entry.name == name {
+			return entry
+		}
+	}
+	return nil
+}
+
 func (m *Manager) Push(channel interface{}, name string) error {
 	ch := reflect.ValueOf(channel)
 	if ch.Kind() != reflect.Chan || ch.Type().ChanDir()&reflect.RecvDir == 0 {
 		// pusher will not be able to receive from channel
 		panic(errBadPushChan)
 	}
-	m.pushReq <- addReq{ch, hashName(name)}
-	select {
-	case err := <-m.pushResp:
-		return err
-	case <-m.GotError():
-		return m.Error()
-	}
+	return m.push.add(ch, name)
 }
 
 func (m *Manager) Pull(channel interface{}, name string) error {
@@ -118,13 +122,7 @@ func (m *Manager) Pull(channel interface{}, name string) error {
 		// puller will not be able to send to channel
 		panic(errBadPullChan)
 	}
-	m.pullReq <- addReq{ch, hashName(name)}
-	select {
-	case err := <-m.pullResp:
-		return err
-	case <-m.GotError():
-		return m.Error()
-	}
+	return m.pull.add(ch, name)
 }
 
 func (m *Manager) signalError(err error) {
