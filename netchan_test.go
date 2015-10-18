@@ -97,7 +97,7 @@ func TestManyChans(t *testing.T) {
 
 func TestCredits(t *testing.T) {
 	conn := newConn()
-	intProducer(t, Manage(sideA(conn)), "int chan", 50000)
+	intProducer(t, Manage(sideA(conn)), "int chan", 1000)
 	s := <-intConsumer(t, Manage(sideB(conn)), "int chan")
 	checkIntSlice(t, s)
 }

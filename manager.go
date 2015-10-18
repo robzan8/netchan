@@ -11,8 +11,8 @@ import (
 )
 
 var (
-	errBadPushChan = errors.New("netchan Manager: Push called with bad channel argument")
-	errBadPullChan = errors.New("netchan Manager: Pull called with bad channel argument")
+	errBadPushChan = errors.New("netchan: Push called with bad channel argument")
+	errBadPullChan = errors.New("netchan: Pull called with bad channel argument")
 )
 
 // sha1-hashed name of a net channel
@@ -56,13 +56,13 @@ func Manage(conn io.ReadWriter) *Manager {
 	pushTab := &pushTable{pending: make(map[hashedName]reflect.Value)}
 	*push = pusher{toEncoder: pushElemCh, table: pushTab, man: m}
 	push.initialize()
-	cPull := &credPuller{creditCh: pullCredCh, table: pushTab, man: m}
+	cRecv := &credReceiver{creditCh: pullCredCh, table: pushTab, man: m}
 
 	pullElemCh := make(chan element, chCap)
 	pushCredCh := make(chan credit, chCap)
 	pullTab := new(pullTable)
 	*pull = puller{elemCh: pullElemCh, table: pullTab, man: m}
-	cPush := &credPusher{toEncoder: pushCredCh, table: pullTab, man: m}
+	cSend := &credSender{toEncoder: pushCredCh, table: pullTab, man: m}
 
 	enc := &encoder{elemCh: pushElemCh, creditCh: pushCredCh, man: m}
 	enc.enc = gob.NewEncoder(conn)
@@ -71,8 +71,8 @@ func Manage(conn io.ReadWriter) *Manager {
 
 	go push.run()
 	go pull.run()
-	go cPush.run()
-	go cPull.run()
+	go cRecv.run()
+	go cSend.run()
 	go enc.run()
 	go dec.run()
 	return m
@@ -106,7 +106,8 @@ func (m *Manager) signalError(err error) {
 	m.errMu.Lock()
 	defer m.errMu.Unlock()
 	prevErr := m.Error()
-	if prevErr != nil { // someone signaled an error before us
+	if prevErr != nil {
+		// someone signaled an error before us
 		return
 	}
 	m.err.Store(&err)

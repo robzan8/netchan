@@ -24,8 +24,8 @@ type encoder struct {
 	elemCh   <-chan element // from pusher
 	creditCh <-chan credit  // from puller
 	man      *Manager
+	enc      *gob.Encoder
 
-	enc *gob.Encoder
 	err error
 }
 
@@ -73,10 +73,9 @@ func (e *encoder) run() {
 }
 
 var (
-	errBadId          = errors.New("netchan decoder: out of bounds id received")
-	errInvalidMsgType = errors.New("netchan decoder: message with invalid type received")
-	errInvalidCred    = errors.New("netchan decoder: credit with non-positive value received")
-	errUnwantedElem   = errors.New("netchan decoder: element received for channel not being pulled")
+	errInvalidId      = errors.New("netchan: message with invalid id received")
+	errInvalidCred    = errors.New("netchan: credit with non-positive value received")
+	errInvalidMsgType = errors.New("netchan: message with invalid type received")
 )
 
 type decError struct {
@@ -92,8 +91,7 @@ type decoder struct {
 	toCPuller chan<- credit
 	table     *pullTable
 	man       *Manager
-
-	dec *gob.Decoder
+	dec       *gob.Decoder
 }
 
 func (d *decoder) decodeVal(v reflect.Value) {
@@ -113,7 +111,7 @@ func (d *decoder) run() {
 		var h header
 		d.decode(&h)
 		if h.ChanId < 0 {
-			raiseError(errBadId)
+			raiseError(errInvalidId)
 		}
 		switch h.MsgType {
 		case elemMsg:
@@ -122,7 +120,7 @@ func (d *decoder) run() {
 			d.table.RLock()
 			if elem.id >= len(d.table.t) || !d.table.t[elem.id].present {
 				d.table.RUnlock()
-				raiseError(errBadId)
+				raiseError(errInvalidId)
 			}
 			elemType := d.table.t[elem.id].ch.Type().Elem()
 			d.table.RUnlock()
@@ -135,6 +133,9 @@ func (d *decoder) run() {
 			var cred credit
 			cred.id = h.ChanId
 			d.decode(&cred.incr)
+			if cred.incr <= 0 {
+				raiseError(errInvalidCred)
+			}
 			var isInit bool
 			d.decode(&isInit)
 			if isInit {
