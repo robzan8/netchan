@@ -87,11 +87,11 @@ func raiseError(err error) {
 }
 
 type decoder struct {
-	toPuller  chan<- element
-	toCPuller chan<- credit
-	table     *pullTable
-	man       *Manager
-	dec       *gob.Decoder
+	toPuller   chan<- element
+	toCredRecv chan<- credit
+	table      *pullTable
+	man        *Manager
+	dec        *gob.Decoder
 }
 
 func (d *decoder) decodeVal(v reflect.Value) {
@@ -142,7 +142,7 @@ func (d *decoder) run() {
 				cred.name = new(hashedName)
 				d.decode(cred.name)
 			}
-			d.toCPuller <- cred
+			d.toCredRecv <- cred
 
 		case errorMsg:
 			var errString string
@@ -170,5 +170,5 @@ func (d *decoder) shutDown() {
 	}
 	d.man.signalError(decErr.err)
 	close(d.toPuller)
-	close(d.toCPuller)
+	close(d.toCredRecv)
 }

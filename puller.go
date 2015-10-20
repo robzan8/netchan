@@ -79,16 +79,13 @@ func (p *puller) handleElem(elem element) error {
 		p.table.Unlock()
 		return nil
 	}
-	ch := entry.ch
-	chCap := int(entry.chCap)
-	p.table.RUnlock()
-	if ch.Len() == chCap {
+	if ch.Len() == int(entry.chCap) {
+		p.table.RUnlock()
 		return errCredExceeded
 	}
 	// do not swap Send and AddInt64 operations
-	ch.Send(elem.val)
-	p.table.RLock()
-	atomic.AddInt64(&p.table.t[elem.id].received, 1)
+	ch.Send(elem.val) // does not block
+	atomic.AddInt64(&enrty.received, 1)
 	p.table.RUnlock()
 	return nil
 }
