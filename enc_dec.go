@@ -21,8 +21,8 @@ type header struct {
 }
 
 type encoder struct {
-	elemCh   <-chan element // from pusher
-	creditCh <-chan credit  // from puller
+	elemCh   <-chan element // from sender
+	creditCh <-chan credit  // from credit sender
 	man      *Manager
 	enc      *gob.Encoder
 
@@ -87,7 +87,7 @@ func raiseError(err error) {
 }
 
 type decoder struct {
-	toPuller   chan<- element
+	toReceiver chan<- element
 	toCredRecv chan<- credit
 	table      *pullTable
 	man        *Manager
@@ -127,7 +127,7 @@ func (d *decoder) run() {
 			elem.val = reflect.New(elemType).Elem()
 			d.decodeVal(elem.val)
 			d.decode(&elem.ok)
-			d.toPuller <- elem
+			d.toReceiver <- elem
 
 		case creditMsg:
 			var cred credit
@@ -169,6 +169,6 @@ func (d *decoder) shutDown() {
 		panic(e)
 	}
 	d.man.signalError(decErr.err)
-	close(d.toPuller)
+	close(d.toReceiver)
 	close(d.toCredRecv)
 }

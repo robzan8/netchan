@@ -1,4 +1,4 @@
-package netchan
+package netchan_test
 
 import (
 	"strconv"
@@ -16,7 +16,7 @@ func intProducer(t *testing.T, man *Manager, chName string, n int) {
 	}()
 	go func() {
 		ch := make(chan int, smallBuf)
-		err := man.Push(ch, chName)
+		err := man.SendProxy(ch, chName)
 		if err != nil {
 			t.Error(err)
 		}
@@ -36,7 +36,7 @@ func intConsumer(t *testing.T, man *Manager, chName string) <-chan []int {
 	go func() {
 		var slice []int
 		ch := make(chan int, bigBuf)
-		err := man.Pull(ch, chName)
+		err := man.RecvProxy(ch, chName)
 		if err != nil {
 			t.Error(err)
 		}
@@ -57,7 +57,7 @@ func checkIntSlice(t *testing.T, s []int) {
 	}
 }
 
-func TestPushThenPull(t *testing.T) {
+func TestSendThenRecv(t *testing.T) {
 	conn := newConn()
 	intProducer(t, Manage(sideA(conn)), "int chan", 100)
 	time.Sleep(50 * time.Millisecond)
@@ -65,7 +65,7 @@ func TestPushThenPull(t *testing.T) {
 	checkIntSlice(t, s)
 }
 
-func TestPullThenPush(t *testing.T) {
+func TestRecvThenSend(t *testing.T) {
 	conn := newConn()
 	sliceCh := intConsumer(t, Manage(sideB(conn)), "int chan")
 	time.Sleep(50 * time.Millisecond)
