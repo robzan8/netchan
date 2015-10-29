@@ -125,7 +125,8 @@ func (e *errAlreadyOpen) Error() string {
 // will return an error.
 //
 // To close a net-chan, close the channel used for sending; the receiving channel on the
-// other peer will be closed too. Messages that are in flight will not be lost.
+// other peer will be closed too. Messages that are already in the buffers or in flight
+// will not be lost.
 func (m *Manager) Open(name string, dir Dir, channel interface{}) error {
 	ch := reflect.ValueOf(channel)
 	if ch.Kind() != reflect.Chan {

@@ -75,7 +75,7 @@ func sendHeartbeat(hb chan<- struct{}, man *netchan.Manager) {
 func heartbeatPeer(conn io.ReadWriter) {
 	man := netchan.Manage(conn)
 	// the same manager is used to open both channels.
-	// On each end, a connection must have only one manager.
+	// On each end, a connection must have only one manager
 	recv := make(chan struct{}, 1)
 	err := man.Open("heartbeat", netchan.Recv, recv)
 	if err != nil {
@@ -93,9 +93,9 @@ func heartbeatPeer(conn io.ReadWriter) {
 
 // This example shows how to add heartbeats to a netchan session.
 func Example_heartbeat() {
-	conn := newPipeConn()
-	go heartbeatPeer(conn.sideA)
-	go heartbeatPeer(conn.sideB)
+	sideA, sideB := newPipeConn()
+	go heartbeatPeer(sideA)
+	go heartbeatPeer(sideB)
 	time.Sleep(2 * time.Second)
 	// Output:
 }

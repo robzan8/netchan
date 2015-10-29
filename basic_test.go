@@ -4,14 +4,13 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"time"
 
 	"github.com/robzan8/netchan"
 )
 
 // emitIntegers sends the integers from 1 to n on net-chan "integers".
-// This happens on peer 1 and conn would normally be a TCP-like connection to peer 2.
-func emitIntegers(conn io.ReadWriteCloser, n int) {
+// conn would normally be a TCP-like connection to the other peer.
+func emitIntegers(conn io.ReadWriter, n int) {
 	man := netchan.Manage(conn) // let a netchan.Manager handle the connection
 	ch := make(chan int, 10)
 	// open net-chan "integers" for sending with ch
@@ -20,24 +19,27 @@ func emitIntegers(conn io.ReadWriteCloser, n int) {
 		log.Fatal(err)
 	}
 	for i := 1; i <= n; i++ {
-		// check the error signal while sending messages,
-		// otherwise the send operation can block forever in case of error
+		// check the error signal while sending (and receiving) messages,
+		// otherwise the operation can block forever in case of error
 		select {
 		case ch <- i:
 		case <-man.ErrorSignal():
-			handleError(man.Error(), man)
+			// when an error occurs, close the connection, so that the manager's
+			// goroutines that are eventually stuck reading or writing can return
+			man.CloseConn()
+			log.Fatal(man.Error())
 		}
 	}
-	close(ch) // the receiving channel will be closed;
+	close(ch) // the other peer's receiving channel will be closed;
 	// messages in flight will not be lost
 
-	// wait that peer receives everything and closes the connection
-	<-man.ErrorSignal() // EOF or similar
-	conn.Close()
+	// wait that the other peer receives everything
+	// and closes the connection, we will get EOF or similar
+	<-man.ErrorSignal()
 }
 
-// sumIntegers receives the integers from the net-chan and returns their sum.
-func sumIntegers(conn io.ReadWriteCloser) int {
+// sumIntegers receives the integers from net-chan "integers" and returns their sum.
+func sumIntegers(conn io.ReadWriter) int {
 	man := netchan.Manage(conn)
 	// Open with Recv direction requires a buffered channel. The buffer
 	// size can affect performance, see the documentation about flow control
@@ -47,26 +49,21 @@ func sumIntegers(conn io.ReadWriteCloser) int {
 		log.Fatal(err)
 	}
 	sum := 0
-	i := 0
-	for open := true; open; {
+Loop:
+	for {
 		select {
-		case i, open = <-ch:
+		case i, ok := <-ch:
+			if !ok {
+				break Loop
+			}
 			sum += i
 		case <-man.ErrorSignal():
-			handleError(man.Error(), man)
+			man.CloseConn()
+			log.Fatal(man.Error())
 		}
 	}
-	conn.Close()
-	return sum
-}
-
-func handleError(err error, man *netchan.Manager) {
-	// wait that the manager communicates the error to the other peer
-	time.Sleep(1 * time.Second)
-	// close the connection, so that the manager's goroutines
-	// that are eventually stuck reading or writing can return
 	man.CloseConn()
-	log.Fatal(err)
+	return sum
 }
 
 // This example shows a basic netchan session: two peers establish a connection and
@@ -74,11 +71,9 @@ func handleError(err error, man *netchan.Manager) {
 // net-chan for sending; peer 2 opens the same net-chan (by name) for receiving;
 // the peers communicate using the Go channels associated with the net-chans.
 func Example_basic() {
-	conn := newPipeConn() // a connection based on io.PipeReader/Writer
-	// normally emitIntegers and sumIntegers would be executed
-	// on different machines, connected by a TCP-like connection
-	go emitIntegers(conn.sideA, 100)
-	sum := sumIntegers(conn.sideB)
+	sideA, sideB := newPipeConn() // a connection based on io.PipeReader/Writer
+	go emitIntegers(sideA, 100)
+	sum := sumIntegers(sideB)
 	fmt.Println(sum)
 	// Output: 5050
 }

@@ -9,8 +9,7 @@ import (
 	"github.com/robzan8/netchan"
 )
 
-// sanity check of 1GB, as in gob/decoder.go
-const tooBig = 1 << 30
+const tooBig = 1 << 30 // sanity check of 1GB, as in gob/decoder.go
 const uint64Size = 8
 
 var (
@@ -68,8 +67,8 @@ func (l *limGobReader) Read(buf []byte) (n int, err error) {
 	return
 }
 
-// reached the length of a new message,
-// parse it like decodeUintReader in gob/decode.go and check if it exceeds the limit
+// readMsgLen parses the length of a message like decodeUintReader
+// in gob/decode.go and check if it exceeds the limit
 func (l *limGobReader) readMsgLen(buf []byte) (n int, err error) {
 	p, err := l.r.Peek(1)
 	if err != nil {
@@ -119,9 +118,9 @@ func (l *limGobReader) ReadByte() (c byte, err error) {
 }
 
 func TestLimGobReader(t *testing.T) {
-	conn := newPipeConn()
-	go sliceProducer(t, conn.sideA)
-	sliceConsumer(t, conn.sideB)
+	sideA, sideB := newPipeConn()
+	go sliceProducer(t, sideA)
+	sliceConsumer(t, sideB)
 }
 
 const (
@@ -129,7 +128,7 @@ const (
 	numSlices = 100 // number of slices to send
 )
 
-// sends slices to sliceConsumer. The last slice will be too big.
+// sliceProducer sends on "slices". The last slice will be too big.
 func sliceProducer(t *testing.T, conn io.ReadWriter) {
 	man := netchan.Manage(conn)
 	ch := make(chan []byte, 1)
@@ -158,7 +157,7 @@ type readWriter struct {
 	io.Writer
 }
 
-// receives the slices using a limGobReader.
+// sliceConsumer receives from "slices" using a limGobReader.
 // The last slice is too big and must generate errSizeExceeded
 func sliceConsumer(t *testing.T, conn io.ReadWriter) {
 	rw := readWriter{newLimGobReader(conn, limit), conn}
