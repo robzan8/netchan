@@ -9,9 +9,10 @@ import (
 type msgType int
 
 const (
-	_ msgType = iota
-	elemMsg
+	elemMsg = iota
+	closeMsg
 	creditMsg
+	openMsg
 	errorMsg
 )
 
@@ -47,24 +48,27 @@ func (e *encoder) run() {
 	for e.elemCh != nil || e.creditCh != nil {
 		select {
 		case elem, ok := <-e.elemCh:
-			if ok {
+			switch {
+			case !ok:
+				e.elemCh = nil
+			case !elem.ok:
+				e.encode(header{closeMsg, elem.id})
+			default:
 				e.encode(header{elemMsg, elem.id})
 				e.encodeVal(elem.val)
-				e.encode(elem.ok)
-			} else {
-				e.elemCh = nil
 			}
 
 		case cred, ok := <-e.creditCh:
-			if ok {
+			switch {
+			case !ok:
+				e.creditCh = nil
+			case cred.name != nil:
+				e.encode(header{openMsg, cred.id})
+				e.encode(cred.incr)
+				e.encode(cred.name)
+			default:
 				e.encode(header{creditMsg, cred.id})
 				e.encode(cred.incr)
-				e.encode(cred.name != nil)
-				if cred.name != nil {
-					e.encode(cred.name)
-				}
-			} else {
-				e.creditCh = nil
 			}
 		}
 	}
@@ -89,7 +93,7 @@ func raiseError(err error) {
 type decoder struct {
 	toReceiver chan<- element
 	toCredRecv chan<- credit
-	table      *pullTable
+	table      *recvTable
 	man        *Manager
 	dec        *gob.Decoder
 }
@@ -115,8 +119,7 @@ func (d *decoder) run() {
 		}
 		switch h.MsgType {
 		case elemMsg:
-			var elem element
-			elem.id = h.ChanId
+			elem := element{id: h.ChanId, ok: true}
 			d.table.RLock()
 			if elem.id >= len(d.table.t) || !d.table.t[elem.id].present {
 				d.table.RUnlock()
@@ -126,19 +129,18 @@ func (d *decoder) run() {
 			d.table.RUnlock()
 			elem.val = reflect.New(elemType).Elem()
 			d.decodeVal(elem.val)
-			d.decode(&elem.ok)
 			d.toReceiver <- elem
 
-		case creditMsg:
-			var cred credit
-			cred.id = h.ChanId
+		case closeMsg:
+			d.toReceiver <- element{id: h.ChanId, ok: false}
+
+		case creditMsg, openMsg:
+			cred := credit{id: h.ChanId}
 			d.decode(&cred.incr)
 			if cred.incr <= 0 {
 				raiseError(errInvalidCred)
 			}
-			var isInit bool
-			d.decode(&isInit)
-			if isInit {
+			if h.MsgType == openMsg {
 				cred.name = new(hashedName)
 				d.decode(cred.name)
 			}

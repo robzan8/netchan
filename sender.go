@@ -20,7 +20,7 @@ type sendEntry struct {
 	present bool
 	ch      reflect.Value
 	credit  int64
-	_       int64 // padding
+	recvCap int64
 }
 
 type sendTable struct {
@@ -97,7 +97,8 @@ func (s *sender) run() {
 			entry := &s.table.t[id]
 			cred := atomic.LoadInt64(&entry.credit)
 			if entry.present && cred > 0 {
-				s.cases = append(s.cases, reflect.SelectCase{Dir: reflect.SelectRecv, Chan: entry.ch})
+				s.cases = append(s.cases,
+					reflect.SelectCase{Dir: reflect.SelectRecv, Chan: entry.ch})
 				s.ids = append(s.ids, id)
 			}
 		}
@@ -145,9 +146,18 @@ func (r *credReceiver) handleCred(cred credit) error {
 		r.table.RUnlock()
 		return errInvalidId
 	}
-	// it may happen that the entry is not present, because the channel
-	// has just been closed; increasing the credit doesn't do any damage
-	atomic.AddInt64(&r.table.t[cred.id].credit, cred.incr)
+	entry := &r.table.t[cred.id]
+	if !entry.present {
+		// it may happen that the entry is not present,
+		// because the channel has just been closed; no problem.
+		r.table.RUnlock()
+		return nil
+	}
+	newCred := atomic.AddInt64(&entry.credit, cred.incr)
+	if newCred > entry.recvCap {
+		r.table.RUnlock()
+		return errors.New("wrong credit!")
+	}
 	r.table.RUnlock()
 	return nil
 }
@@ -156,43 +166,47 @@ func (r *credReceiver) handleInitCred(cred credit) error {
 	r.table.Lock()
 	defer r.table.Unlock()
 
-	entry := sendEntry{name: *cred.name, present: true, credit: cred.incr}
-	ch, present := r.table.pending[*cred.name]
-	if present {
-		entry.ch = ch
-		delete(r.table.pending, *cred.name)
-	} else {
-		halfOpen := 0
-		for _, e := range r.table.t {
-			if e.present && e.ch == (reflect.Value{}) {
-				halfOpen++
-			}
+	// explain checks
+	halfOpen := 0
+	holes := 0
+	for i := range r.table.t {
+		entry := &r.table.t[i]
+		if entry.name == *cred.name {
+			return errors.New("netchan Manager: initial credit for already open net-chan")
 		}
-		if halfOpen > maxHalfOpen {
-			return errors.New("netchan Manager: too many half open net-chans")
+		if !entry.present {
+			holes++
+		} else if entry.ch == (reflect.Value{}) {
+			halfOpen++
 		}
 	}
+	if halfOpen > maxHalfOpen {
+		return errors.New("netchan Manager: too many half open net-chans")
+	}
+	if holes > maxHoles {
+		return errors.New("netchan Manager: peer does not recycle old net-chan IDs")
+	}
+
+	newEntry := sendEntry{
+		name:    *cred.name,
+		present: true,
+		ch:      r.table.pending[*cred.name], // may not be present
+		credit:  cred.incr,
+		recvCap: cred.incr,
+	}
+	delete(r.table.pending, *cred.name)
 	if cred.id == len(r.table.t) {
 		// cred.id is a fresh slot
-		holes := 0
-		for _, e := range r.table.t {
-			if !e.present {
-				holes++
-			}
-		}
-		if holes > maxHoles {
-			return errors.New("netchan Manager: peer does not recycle old net-chan IDs")
-		}
-		r.table.t = append(r.table.t, entry)
+		r.table.t = append(r.table.t, newEntry)
 		return nil
 	}
 	if cred.id < len(r.table.t) {
-		// cred.id is an old slot
+		// cred.id is a recycled slot
 		if r.table.t[cred.id].present {
 			// slot is not free
 			return errInvalidId
 		}
-		r.table.t[cred.id] = entry
+		r.table.t[cred.id] = newEntry
 		return nil
 	}
 	return errInvalidId

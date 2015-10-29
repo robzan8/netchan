@@ -1,48 +1,3 @@
-/*
-Package netchan enables using Go channels to communicate over a network connection.
-One peer sends messages to a channel and the other peer receives the messages from
-another channel of the same type: netchan takes care of transferring the messages
-between the two channels over the connection.
-
-An example of a basic netchan session follows:
-
-Two peers establish a connection and delegate its management to a netchan.Manager.
-The manager allows opening net-chans with a name and an associated channel, used for
-sending or receiving. Peer 1 opens a net-chan for sending. Peer 2 opens the same
-net-chan (with the same name) for receiving. The peers can then communicate using
-the channels. In general, many net-chans can be opened on top of a single connection,
-in both directions.
-
-	func peer1() {
-		conn := net.Dial("tcp", "peer2:1234")
-		man := netchan.Manage(conn)
-		ch := make(chan int, 10)
-		man.Open("integers", ch, netchan.Send)
-		for i := 0; i < 300; i++ {
-			ch <- i // sending messages to peer 2
-		}
-		close(ch)
-	}
-
-	func peer2() {
-		ln := net.Listen("tcp", ":1234")
-		conn := ln.Accept()
-		man := netchan.Manage(conn)
-		ch := make(chan int, 100)
-		man.Open("integers", ch, netchan.Recv)
-		sum := 0
-		for i := range ch { // receiving messages from peer 1
-			sum += i
-		}
-		fmt.Println("sum is", sum)
-	}
-
-A full example that includes error handling can be found in the "examples" section.
-See the advanced topics page for information about netchan internals, performance,
-security, timeouts and heartbeats (after reading the API documentation).
-TODO: insert pointer to advanced topics
-*/
-
 package netchan
 
 import (
@@ -53,7 +8,6 @@ import (
 	"io"
 	"reflect"
 	"sync"
-	"sync/atomic"
 )
 
 // sha1-hashed name of a net-chan
@@ -75,13 +29,15 @@ type credit struct {
 	name *hashedName
 }
 
-// A Manager handles the message traffic of its connection, implementing the netchan protocol.
+// A Manager handles the message traffic of its connection,
+// implementing the netchan protocol.
 type Manager struct {
+	conn io.ReadWriter
 	send *sender
 	recv *receiver
 
-	errMutex  sync.Mutex
-	err       atomic.Value // *error
+	errMutex  sync.RWMutex
+	err       error
 	errSignal chan struct{}
 }
 
@@ -89,12 +45,11 @@ type Manager struct {
 // The connection can be any io.ReadWriter that acts like a full duplex connection and
 // ensures reliable and in-order delivery of data, like: TCP, TLS, unix domain sockets,
 // websockets, in-memory io.PipeReader/Writer.
-// On each peer, one connection must have only one Manager.
+// On each end, a connection must have only one manager.
 func Manage(conn io.ReadWriter) *Manager {
 	send := new(sender)
 	recv := new(receiver)
-	m := &Manager{send: send, recv: recv}
-	m.err.Store((*error)(nil))
+	m := &Manager{conn: conn, send: send, recv: recv}
 	m.errSignal = make(chan struct{})
 
 	const chCap int = 8
@@ -125,6 +80,14 @@ func Manage(conn io.ReadWriter) *Manager {
 	return m
 }
 
+func (m *Manager) CloseConn() error {
+	c, ok := m.conn.(io.Closer)
+	if !ok {
+		return errors.New("netchan CloseConn: connection is not an io.Closer")
+	}
+	return c.Close()
+}
+
 // The direction of a net-chan from the client's perspective.
 type Dir int
 
@@ -153,15 +116,16 @@ func (e *errAlreadyOpen) Error() string {
 		e.name, e.dir)
 }
 
-// Open method opens a net-chan with the specified name, channel and direction, on the
-// connection handled by the manager.
-// The channel parameter must be a channel.
+// Open method opens a net-chan with the given name and direction on the connection
+// handled by the manager. The channel argument must be a channel and will be used for
+// receiving or sending data on this net-chan.
+//
 // If the direction is Recv, the channel must have a buffer capacity greater than 0.
 // Opening a net-chan twice, i.e. with the same name and direction on the same manager,
 // will return an error.
-// To close a net-chan, close the channel used for sending and eventually wait that the
-// buffers are drained and the close message is propagated to the receiving peer before
-// closing the connection.
+//
+// To close a net-chan, close the channel used for sending; the receiving channel on the
+// other peer will be closed too. Messages that are in flight will not be lost.
 func (m *Manager) Open(name string, dir Dir, channel interface{}) error {
 	ch := reflect.ValueOf(channel)
 	if ch.Kind() != reflect.Chan {
@@ -191,28 +155,35 @@ func (m *Manager) Open(name string, dir Dir, channel interface{}) error {
 func (m *Manager) signalError(err error) {
 	m.errMutex.Lock()
 	defer m.errMutex.Unlock()
-	prevErr := m.Error()
-	if prevErr != nil {
+
+	if m.err != nil {
 		// keep oldest error
 		return
 	}
-	m.err.Store(&err)
+	m.err = err
 	close(m.errSignal)
 }
 
-// Error returns the first (oldest) error that occurred on this Manager. If no error
-// occurred, it returns nil. See the error handling example.
+// Error returns the first error that occurred on this manager. If no error
+// occurred, it returns nil.
+//
+// When an error occurs, the manager tries to communicate it to the peer, closes all the
+// user channels registered for receiving and then shuts down. Some goroutine might be
+// blocked reading or writing to the connection and could "leak", if the connection is
+// not closed.
+//
+// See the basic package example for error handling.
 func (m *Manager) Error() error {
-	err := m.err.Load().(*error)
-	if err == nil {
-		return nil
-	}
-	return *err
+	m.errMutex.RLock()
+	err := m.err
+	m.errMutex.RUnlock()
+	return err
 }
 
 // ErrorSignal returns a channel that never receives any message and is closed when an
-// error occurs on this manager. When an error occurs, the manager shuts down. See the
-// error handling example.
+// error occurs on this manager.
+//
+// See the basic package example for error handling.
 func (m *Manager) ErrorSignal() <-chan struct{} {
 	return m.errSignal
 }

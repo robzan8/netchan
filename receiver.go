@@ -13,8 +13,8 @@ type recvEntry struct {
 	present  bool
 	init     bool
 	ch       reflect.Value
-	chCap    int64
 	received int64
+	recvCap  int64
 }
 
 type recvTable struct {
@@ -32,8 +32,9 @@ func (r *receiver) open(name string, ch reflect.Value) error {
 	r.table.Lock()
 	defer r.table.Unlock()
 
+	hName := hashName(name)
 	for _, entry := range r.table.t {
-		if entry.name == name {
+		if entry.name == hName {
 			return &errAlreadyOpen{name, Recv}
 		}
 	}
@@ -45,11 +46,18 @@ func (r *receiver) open(name string, ch reflect.Value) error {
 			break
 		}
 	}
-	entry := recvEntry{name, true, true, ch, int64(ch.Cap()), 0}
+	newEntry := recvEntry{
+		name:     hName,
+		present:  true,
+		init:     true,
+		ch:       ch,
+		received: 0,
+		recvCap:  int64(ch.Cap()),
+	}
 	if id == len(r.table.t) {
-		r.table.t = append(r.table.t, entry)
+		r.table.t = append(r.table.t, newEntry)
 	} else {
-		r.table.t[id] = entry
+		r.table.t[id] = newEntry
 	}
 	return nil
 }
@@ -74,13 +82,13 @@ func (r *receiver) handleElem(elem element) error {
 		r.table.Unlock()
 		return nil
 	}
-	if ch.Len() == int(entry.chCap) {
+	if atomic.LoadInt64(&entry.received) >= entry.recvCap {
 		r.table.RUnlock()
 		return errors.New("netchan Manager: peer sent more than its credit allowed")
 	}
 	// do not swap Send and AddInt64 operations
-	ch.Send(elem.val) // does not block
-	atomic.AddInt64(&enrty.received, 1)
+	entry.ch.Send(elem.val) // does not block
+	atomic.AddInt64(&entry.received, 1)
 	r.table.RUnlock()
 	return nil
 }
@@ -90,11 +98,13 @@ func (r *receiver) run() {
 		elem, ok := <-r.elemCh
 		if !ok {
 			// error occurred and decoder shut down
-			r.table.Lock()
+			/*r.table.Lock()
 			for _, entry := range r.table.t {
-				entry.ch.Close()
+				if entry.ch != (reflect.Value{}) { // check if present?
+					entry.ch.Close()
+				}
 			}
-			r.table.Unlock()
+			r.table.Unlock()*/
 			return
 		}
 		err := r.handleElem(elem)
@@ -136,12 +146,14 @@ func (s *credSender) updateCredits() {
 		chLen := int64(entry.ch.Len())
 		consumed := received - chLen
 		if entry.init {
-			s.credits = append(s.credits, credit{id, entry.chCap, &entry.name})
+			s.credits = append(s.credits, credit{id, entry.recvCap, &entry.name})
 			entry.init = false
-		} else if consumed*2 >= entry.chCap { // i.e. consumed >= ceil(chCap/2)
+		} else if consumed*2 >= entry.recvCap { // i.e. consumed >= ceil(recvCap/2)
 			s.credits = append(s.credits, credit{id, consumed, nil})
+			// forget about the messages the user consumed
 			atomic.AddInt64(&entry.received, -consumed)
 		}
+		// TODO: when much time passes, send credit even if it's small
 	}
 	s.table.RUnlock()
 }
