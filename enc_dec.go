@@ -45,7 +45,6 @@ func (e *encoder) encode(v interface{}) {
 }
 
 func (e *encoder) run() {
-	e.encode(1) // protocol version
 	for e.elemCh != nil || e.creditCh != nil {
 		select {
 		case elem, ok := <-e.elemCh:
@@ -112,12 +111,6 @@ func (d *decoder) decode(v interface{}) {
 
 func (d *decoder) run() {
 	defer d.shutDown()
-
-	var version int
-	d.decode(&version)
-	if version != 1 {
-		raiseError(errors.New("unsupported netchan protocol version"))
-	}
 	for {
 		var h header
 		d.decode(&h)
