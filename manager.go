@@ -6,8 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand"
 	"reflect"
 	"sync/atomic"
+	"time"
 )
 
 // sha1-hashed name of a net-chan
@@ -36,9 +38,10 @@ type Manager struct {
 	send *sender
 	recv *receiver
 
-	errCas    int64        // 1 if error happened, 0 otherwise
-	err       atomic.Value // of type *error
-	errSignal chan struct{}
+	errCas     int64        // 1 if error happened, 0 otherwise
+	err        atomic.Value // of type *error
+	rand       *rand.Rand
+	errSignals []chan struct{}
 }
 
 // Manage function starts a new Manager for the specified connection and returns it.
@@ -51,7 +54,11 @@ func Manage(conn io.ReadWriter) *Manager {
 	recv := new(receiver)
 	m := &Manager{conn: conn, send: send, recv: recv}
 	m.err.Store((*error)(nil))
-	m.errSignal = make(chan struct{})
+	m.rand = rand.New(rand.NewSource(time.Now().UnixNano()))
+	m.errSignals = make([]chan struct{}, 23)
+	for i := range m.errSignals {
+		m.errSignals[i] = make(chan struct{})
+	}
 
 	const chCap int = 8
 	sendElemCh := make(chan element, chCap)
@@ -160,7 +167,9 @@ func (m *Manager) signalError(err error) {
 		return
 	}
 	m.err.Store(&err)
-	close(m.errSignal)
+	for _, sig := range m.errSignals {
+		close(sig)
+	}
 }
 
 // Error returns the first error that occurred on this manager. If no error
@@ -185,8 +194,5 @@ func (m *Manager) Error() error {
 //
 // See the basic package example for error handling.
 func (m *Manager) ErrorSignal() <-chan struct{} {
-	// if everyone listens on the same error signal and it scales badly,
-	// we can keep multiple signals, close them all in case of error and
-	// return a random one here
-	return m.errSignal
+	return m.errSignals[m.rand.Intn(len(m.errSignals))]
 }
