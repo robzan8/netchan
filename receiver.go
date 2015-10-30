@@ -98,13 +98,6 @@ func (r *receiver) run() {
 		elem, ok := <-r.elemCh
 		if !ok {
 			// error occurred and decoder shut down
-			/*r.table.Lock()
-			for _, entry := range r.table.t {
-				if entry.ch != (reflect.Value{}) { // check if present?
-					entry.ch.Close()
-				}
-			}
-			r.table.Unlock()*/
 			return
 		}
 		err := r.handleElem(elem)

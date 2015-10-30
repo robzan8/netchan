@@ -34,7 +34,7 @@ func emitIntegers(conn io.ReadWriter, n int) {
 	// messages in flight will not be lost
 
 	// wait that the other peer receives everything
-	// and closes the connection, we will get EOF or similar
+	// and closes the connection; we will get EOF or similar
 	<-man.ErrorSignal()
 }
 

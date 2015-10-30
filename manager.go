@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"io"
 	"reflect"
-	"sync"
+	"sync/atomic"
 )
 
 // sha1-hashed name of a net-chan
@@ -36,8 +36,8 @@ type Manager struct {
 	send *sender
 	recv *receiver
 
-	errMutex  sync.RWMutex
-	err       error
+	errCas    int64        // 1 if error happened, 0 otherwise
+	err       atomic.Value // of type *error
 	errSignal chan struct{}
 }
 
@@ -50,6 +50,7 @@ func Manage(conn io.ReadWriter) *Manager {
 	send := new(sender)
 	recv := new(receiver)
 	m := &Manager{conn: conn, send: send, recv: recv}
+	m.err.Store((*error)(nil))
 	m.errSignal = make(chan struct{})
 
 	const chCap int = 8
@@ -154,14 +155,11 @@ func (m *Manager) Open(name string, dir Dir, channel interface{}) error {
 }
 
 func (m *Manager) signalError(err error) {
-	m.errMutex.Lock()
-	defer m.errMutex.Unlock()
-
-	if m.err != nil {
-		// keep oldest error
+	firstErr := atomic.CompareAndSwapInt64(&m.errCas, 0, 1)
+	if !firstErr {
 		return
 	}
-	m.err = err
+	m.err.Store(&err)
 	close(m.errSignal)
 }
 
@@ -175,10 +173,11 @@ func (m *Manager) signalError(err error) {
 //
 // See the basic package example for error handling.
 func (m *Manager) Error() error {
-	m.errMutex.RLock()
-	err := m.err
-	m.errMutex.RUnlock()
-	return err
+	err := m.err.Load().(*error)
+	if err == nil {
+		return nil
+	}
+	return *err
 }
 
 // ErrorSignal returns a channel that never receives any message and is closed when an
@@ -186,5 +185,8 @@ func (m *Manager) Error() error {
 //
 // See the basic package example for error handling.
 func (m *Manager) ErrorSignal() <-chan struct{} {
+	// if everyone listens on the same error signal and it scales badly,
+	// we can keep multiple signals, close them all in case of error and
+	// return a random one here
 	return m.errSignal
 }

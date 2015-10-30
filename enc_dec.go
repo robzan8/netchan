@@ -152,7 +152,6 @@ func (d *decoder) run() {
 			raiseError(errors.New(errString))
 
 		default:
-			// more resilient?
 			raiseError(errInvalidMsgType)
 		}
 

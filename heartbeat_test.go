@@ -66,7 +66,7 @@ func sendHeartbeat(hb chan<- struct{}, man *netchan.Manager) {
 	}
 }
 
-// Both peers are opening an "heartbeat" channel for sending and another "heartbeat"
+// Both peers are opening a "heartbeat" channel for sending and another "heartbeat"
 // channel for receiving. The trick is that a net-chan is not identified just by name,
 // but by name and direction. So, it is possible to have, on a single connection, two
 // net-chans with the same name, one that goes from peer 1 to peer 2, the other that
