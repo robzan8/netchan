@@ -6,10 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math/rand"
 	"reflect"
 	"sync/atomic"
-	"time"
 )
 
 // sha1-hashed name of a net-chan
@@ -31,6 +29,13 @@ type credit struct {
 	name *hashedName
 }
 
+// for Manager.errState
+const (
+	noErr int64 = iota
+	settingErr
+	errSet
+)
+
 // A Manager handles the message traffic of its connection,
 // implementing the netchan protocol.
 type Manager struct {
@@ -38,10 +43,9 @@ type Manager struct {
 	send *sender
 	recv *receiver
 
-	errCas     int64        // 1 if error happened, 0 otherwise
-	err        atomic.Value // of type *error
-	rand       *rand.Rand
-	errSignals []chan struct{}
+	errState  int64
+	err       error
+	errSignal chan struct{}
 }
 
 // Manage function starts a new Manager for the specified connection and returns it.
@@ -53,12 +57,7 @@ func Manage(conn io.ReadWriter) *Manager {
 	send := new(sender)
 	recv := new(receiver)
 	m := &Manager{conn: conn, send: send, recv: recv}
-	m.err.Store((*error)(nil))
-	m.rand = rand.New(rand.NewSource(time.Now().UnixNano()))
-	m.errSignals = make([]chan struct{}, 23)
-	for i := range m.errSignals {
-		m.errSignals[i] = make(chan struct{})
-	}
+	m.errSignal = make(chan struct{})
 
 	const chCap int = 8
 	sendElemCh := make(chan element, chCap)
@@ -162,14 +161,13 @@ func (m *Manager) Open(name string, dir Dir, channel interface{}) error {
 }
 
 func (m *Manager) signalError(err error) {
-	firstErr := atomic.CompareAndSwapInt64(&m.errCas, 0, 1)
+	firstErr := atomic.CompareAndSwapInt64(&m.errState, noErr, settingErr)
 	if !firstErr {
 		return
 	}
-	m.err.Store(&err)
-	for _, sig := range m.errSignals {
-		close(sig)
-	}
+	m.err = err
+	atomic.StoreInt64(&m.errState, errSet)
+	close(m.errSignal)
 }
 
 // Error returns the first error that occurred on this manager. If no error
@@ -182,11 +180,10 @@ func (m *Manager) signalError(err error) {
 //
 // See the basic package example for error handling.
 func (m *Manager) Error() error {
-	err := m.err.Load().(*error)
-	if err == nil {
-		return nil
+	if atomic.LoadInt64(&m.errState) == errSet {
+		return m.err
 	}
-	return *err
+	return nil
 }
 
 // ErrorSignal returns a channel that never receives any message and is closed when an
@@ -194,5 +191,6 @@ func (m *Manager) Error() error {
 //
 // See the basic package example for error handling.
 func (m *Manager) ErrorSignal() <-chan struct{} {
-	return m.errSignals[m.rand.Intn(len(m.errSignals))]
+	// make this scale with multiple channels?
+	return m.errSignal
 }
