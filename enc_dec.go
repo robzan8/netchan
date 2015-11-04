@@ -24,7 +24,7 @@ type header struct {
 type encoder struct {
 	elemCh   <-chan element // from sender
 	creditCh <-chan credit  // from credit sender
-	man      *Manager
+	mn       *Manager
 	enc      *gob.Encoder
 
 	err error
@@ -36,7 +36,7 @@ func (e *encoder) encodeVal(v reflect.Value) {
 	}
 	e.err = e.enc.EncodeValue(v)
 	if e.err != nil {
-		e.man.signalError(e.err)
+		e.mn.signalError(e.err)
 	}
 }
 
@@ -73,7 +73,7 @@ func (e *encoder) run() {
 		}
 	}
 	e.encode(header{errorMsg, -1})
-	e.encode(e.man.Error().Error())
+	e.encode(e.mn.Error().Error())
 }
 
 var (
@@ -94,7 +94,7 @@ type decoder struct {
 	toReceiver chan<- element
 	toCredRecv chan<- credit
 	table      *recvTable
-	man        *Manager
+	mn         *Manager
 	dec        *gob.Decoder
 }
 
@@ -155,7 +155,7 @@ func (d *decoder) run() {
 			raiseError(errInvalidMsgType)
 		}
 
-		if err := d.man.Error(); err != nil {
+		if err := d.mn.Error(); err != nil {
 			raiseError(err)
 		}
 	}
@@ -169,7 +169,7 @@ func (d *decoder) shutDown() {
 	if !ok {
 		panic(e)
 	}
-	d.man.signalError(decErr.err)
+	d.mn.signalError(decErr.err)
 	close(d.toReceiver)
 	close(d.toCredRecv)
 }

@@ -129,7 +129,7 @@ const (
 )
 
 // sliceProducer sends on "slices". The last slice will be too big.
-func sliceProducer(t *testing.T, conn io.ReadWriter) {
+func sliceProducer(t *testing.T, conn io.ReadWriteCloser) {
 	man := netchan.Manage(conn)
 	ch := make(chan []byte, 1)
 	err := man.Open("slices", netchan.Send, ch)
@@ -152,15 +152,15 @@ func sliceProducer(t *testing.T, conn io.ReadWriter) {
 	close(ch)
 }
 
-type readWriter struct {
-	io.Reader
-	io.Writer
-}
-
 // sliceConsumer receives from "slices" using a limGobReader.
 // The last slice is too big and must generate errSizeExceeded
-func sliceConsumer(t *testing.T, conn io.ReadWriter) {
-	rw := readWriter{newLimGobReader(conn, limit), conn}
+func sliceConsumer(t *testing.T, conn io.ReadWriteCloser) {
+	type readWriteCloser struct {
+		io.Reader
+		io.WriteCloser
+	}
+
+	rw := readWriteCloser{newLimGobReader(conn, limit), conn}
 	man := netchan.Manage(rw)
 	// use a receive channel with capacity 1, so that items come
 	// one at a time and we get the error for the last one only

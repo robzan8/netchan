@@ -25,7 +25,7 @@ type recvTable struct {
 type receiver struct {
 	elemCh <-chan element
 	table  *recvTable
-	man    *Manager
+	mn     *Manager
 }
 
 func (r *receiver) open(name string, ch reflect.Value) error {
@@ -102,7 +102,7 @@ func (r *receiver) run() {
 		}
 		err := r.handleElem(elem)
 		if err != nil {
-			r.man.signalError(err)
+			r.mn.signalError(err)
 		}
 	}
 }
@@ -110,13 +110,13 @@ func (r *receiver) run() {
 type credSender struct {
 	toEncoder chan<- credit
 	table     *recvTable
-	man       *Manager
+	mn        *Manager
 
 	credits []credit
 }
 
 func (s *credSender) run() {
-	for s.man.Error() == nil {
+	for s.mn.Error() == nil {
 		s.updateCredits()
 		for _, cred := range s.credits {
 			s.toEncoder <- cred

@@ -34,33 +34,36 @@ const hbInterval = 50 * time.Millisecond
 const hbTimeout = time.Duration(1.2 * float64(hbInterval))
 
 // recvHeartbeat keeps receiving heartbeats
-func recvHeartbeat(hb <-chan struct{}, man *netchan.Manager) {
+func recvHeartbeat(hb <-chan struct{}, mn *netchan.Manager) {
 	for {
+		// check the error signal while receiving (and sending) messages,
+		// otherwise the operation can block forever in case of error
 		select {
-		case _, ok := <-hb:
-			if !ok {
-				log.Fatal("heartbeat channel closed")
-			}
+		case <-hb:
+		case <-mn.ErrorSignal():
+			// when an error occurs, close the connection, so that the manager's
+			// goroutines that are eventually stuck reading or writing can return
+			mn.CloseConn()
+			log.Fatal(mn.Error())
 		case <-time.After(hbTimeout):
-			man.CloseConn()
+			mn.CloseConn()
 			log.Fatal("heartbeat receive took too long")
-		case <-man.ErrorSignal():
-			log.Fatal(man.Error())
 		}
 		time.Sleep(hbInterval)
 	}
 }
 
 // sendHeartbeat keeps sending heartbeats
-func sendHeartbeat(hb chan<- struct{}, man *netchan.Manager) {
+func sendHeartbeat(hb chan<- struct{}, mn *netchan.Manager) {
 	for {
 		select {
 		case hb <- struct{}{}:
+		case <-mn.ErrorSignal():
+			mn.CloseConn()
+			log.Fatal(mn.Error())
 		case <-time.After(hbTimeout):
-			man.CloseConn()
+			mn.CloseConn()
 			log.Fatal("heartbeat send took too long")
-		case <-man.ErrorSignal():
-			log.Fatal(man.Error())
 		}
 		time.Sleep(hbInterval)
 	}
@@ -72,27 +75,28 @@ func sendHeartbeat(hb chan<- struct{}, man *netchan.Manager) {
 // net-chans with the same name, one that goes from peer 1 to peer 2, the other that
 // goes form peer 2 to peer 1. It is useful in cases where the protocol is symmetrical,
 // like heartbeating.
-func heartbeatPeer(conn io.ReadWriter) {
-	man := netchan.Manage(conn)
+func heartbeatPeer(conn io.ReadWriteCloser) {
+	mn := netchan.Manage(conn)
 	// the same manager is used to open both channels.
 	// On each end, a connection must have only one manager
 	recv := make(chan struct{}, 1)
-	err := man.Open("heartbeat", netchan.Recv, recv)
+	err := mn.Open("heartbeat", netchan.Recv, recv)
 	if err != nil {
 		log.Fatal(err)
 	}
-	go recvHeartbeat(recv, man)
+	go recvHeartbeat(recv, mn)
 
 	send := make(chan struct{}, 1)
-	err = man.Open("heartbeat", netchan.Send, send)
+	err = mn.Open("heartbeat", netchan.Send, send)
 	if err != nil {
 		log.Fatal(err)
 	}
-	go sendHeartbeat(send, man)
+	go sendHeartbeat(send, mn)
 }
 
 // This example shows how to add heartbeats to a netchan session.
-func Example_heartbeat() {
+// It also shows how to handle errors.
+func Example_heartbeats() {
 	sideA, sideB := newPipeConn()
 	go heartbeatPeer(sideA)
 	go heartbeatPeer(sideB)

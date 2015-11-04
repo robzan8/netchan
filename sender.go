@@ -32,7 +32,7 @@ type sendTable struct {
 type sender struct {
 	toEncoder chan<- element
 	table     *sendTable
-	man       *Manager
+	mn        *Manager
 
 	cases []reflect.SelectCase
 	ids   []int
@@ -89,7 +89,7 @@ func (s *sender) handleElem(elem element) {
 }
 
 func (s *sender) run() {
-	for s.man.Error() == nil {
+	for s.mn.Error() == nil {
 		s.table.RLock()
 		s.cases = s.cases[:1]
 		s.ids = s.ids[:1]
@@ -118,7 +118,7 @@ func (s *sender) run() {
 type credReceiver struct {
 	creditCh <-chan credit
 	table    *sendTable
-	man      *Manager
+	mn       *Manager
 }
 
 func (r *credReceiver) run() {
@@ -135,7 +135,7 @@ func (r *credReceiver) run() {
 			err = r.handleInitCred(cred)
 		}
 		if err != nil {
-			r.man.signalError(err)
+			r.mn.signalError(err)
 		}
 	}
 }

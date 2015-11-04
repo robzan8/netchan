@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"reflect"
+	"sync"
 	"sync/atomic"
 )
 
@@ -39,9 +40,10 @@ const (
 // A Manager handles the message traffic of its connection,
 // implementing the netchan protocol.
 type Manager struct {
-	conn io.ReadWriter
-	send *sender
-	recv *receiver
+	closeConnMu sync.Mutex
+	conn        io.ReadWriteCloser
+	send        *sender
+	recv        *receiver
 
 	errState  int64
 	err       error
@@ -49,33 +51,33 @@ type Manager struct {
 }
 
 // Manage function starts a new Manager for the specified connection and returns it.
-// The connection can be any io.ReadWriter that acts like a full duplex connection and
+// The connection can be any io.ReadWriteCloser that acts like a full duplex connection and
 // ensures reliable and in-order delivery of data, like: TCP, TLS, unix domain sockets,
 // websockets, in-memory io.PipeReader/Writer.
 // On each end, a connection must have only one manager.
-func Manage(conn io.ReadWriter) *Manager {
+func Manage(conn io.ReadWriteCloser) *Manager {
 	send := new(sender)
 	recv := new(receiver)
-	m := &Manager{conn: conn, send: send, recv: recv}
-	m.errSignal = make(chan struct{})
+	mn := &Manager{conn: conn, send: send, recv: recv}
+	mn.errSignal = make(chan struct{})
 
 	const chCap int = 8
 	sendElemCh := make(chan element, chCap)
 	recvCredCh := make(chan credit, chCap)
 	sendTab := &sendTable{pending: make(map[hashedName]reflect.Value)}
-	*send = sender{toEncoder: sendElemCh, table: sendTab, man: m}
+	*send = sender{toEncoder: sendElemCh, table: sendTab, mn: mn}
 	send.initialize()
-	credRecv := &credReceiver{creditCh: recvCredCh, table: sendTab, man: m}
+	credRecv := &credReceiver{creditCh: recvCredCh, table: sendTab, mn: mn}
 
 	recvElemCh := make(chan element, chCap)
 	sendCredCh := make(chan credit, chCap)
 	recvTab := new(recvTable)
-	*recv = receiver{elemCh: recvElemCh, table: recvTab, man: m}
-	credSend := &credSender{toEncoder: sendCredCh, table: recvTab, man: m}
+	*recv = receiver{elemCh: recvElemCh, table: recvTab, mn: mn}
+	credSend := &credSender{toEncoder: sendCredCh, table: recvTab, mn: mn}
 
-	enc := &encoder{elemCh: sendElemCh, creditCh: sendCredCh, man: m}
+	enc := &encoder{elemCh: sendElemCh, creditCh: sendCredCh, mn: mn}
 	enc.enc = gob.NewEncoder(conn)
-	dec := &decoder{toReceiver: recvElemCh, toCredRecv: recvCredCh, table: recvTab, man: m}
+	dec := &decoder{toReceiver: recvElemCh, toCredRecv: recvCredCh, table: recvTab, mn: mn}
 	dec.dec = gob.NewDecoder(conn)
 
 	go send.run()
@@ -84,15 +86,13 @@ func Manage(conn io.ReadWriter) *Manager {
 	go credSend.run()
 	go enc.run()
 	go dec.run()
-	return m
+	return mn
 }
 
 func (m *Manager) CloseConn() error {
-	c, ok := m.conn.(io.Closer)
-	if !ok {
-		return errors.New("netchan CloseConn: connection is not an io.Closer")
-	}
-	return c.Close()
+	m.closeConnMu.Lock()
+	defer m.closeConnMu.Unlock()
+	return m.conn.Close()
 }
 
 // The direction of a net-chan from the client's perspective.
