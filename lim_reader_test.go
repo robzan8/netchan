@@ -130,9 +130,9 @@ const (
 
 // sliceProducer sends on "slices". The last slice will be too big.
 func sliceProducer(t *testing.T, conn io.ReadWriteCloser) {
-	man := netchan.Manage(conn)
+	mn := netchan.Manage(conn)
 	ch := make(chan []byte, 1)
-	err := man.Open("slices", netchan.Send, ch)
+	err := mn.Open("slices", netchan.Send, ch)
 	if err != nil {
 		t.Error(err)
 	}
@@ -145,27 +145,32 @@ func sliceProducer(t *testing.T, conn io.ReadWriteCloser) {
 		}
 		select {
 		case ch <- slice:
-		case <-man.ErrorSignal():
-			t.Error(man.Error())
+		case <-mn.ErrorSignal():
+			t.Error(mn.Error())
 		}
 	}
 	close(ch)
 }
 
+// limitGobConn applies a limGobReader to a connection
+func limitGobConn(conn io.ReadWriteCloser, n int64) io.ReadWriteCloser {
+	return struct {
+		io.Reader
+		io.WriteCloser
+	}{
+		newLimGobReader(conn, n),
+		conn,
+	}
+}
+
 // sliceConsumer receives from "slices" using a limGobReader.
 // The last slice is too big and must generate errSizeExceeded
 func sliceConsumer(t *testing.T, conn io.ReadWriteCloser) {
-	type readWriteCloser struct {
-		io.Reader
-		io.WriteCloser
-	}
-
-	rw := readWriteCloser{newLimGobReader(conn, limit), conn}
-	man := netchan.Manage(rw)
+	mn := netchan.Manage(limitGobConn(conn, limit))
 	// use a receive channel with capacity 1, so that items come
 	// one at a time and we get the error for the last one only
 	ch := make(chan []byte, 1)
-	err := man.Open("slices", netchan.Recv, ch)
+	err := mn.Open("slices", netchan.Recv, ch)
 	if err != nil {
 		t.Error(err)
 	}
@@ -173,8 +178,8 @@ func sliceConsumer(t *testing.T, conn io.ReadWriteCloser) {
 		if i < numSlices {
 			select {
 			case <-ch:
-			case <-man.ErrorSignal():
-				t.Error(man.Error())
+			case <-mn.ErrorSignal():
+				t.Error(mn.Error())
 			}
 			continue
 		}
@@ -182,8 +187,8 @@ func sliceConsumer(t *testing.T, conn io.ReadWriteCloser) {
 		select {
 		case <-ch:
 			t.Error("limited gob reader did not block too big message")
-		case <-man.ErrorSignal():
-			err := man.Error()
+		case <-mn.ErrorSignal():
+			err := mn.Error()
 			if err == errSizeExceeded {
 				return // success
 			}

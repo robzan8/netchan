@@ -23,23 +23,16 @@ Netchan uses gob for encoding and decoding data. Each netchan message is precede
 
 	type header struct {
 		MsgType int // type of the message immediately following
-		ChanId  int // ID of the channel this message is directed to
+		ChanId  int // ID of the net-chan this message is directed to
 	}
 
-There are 3 different types of messages: element messages (type 1), credit messages (type 2) and error messages (type 3). Messages with type in range [4, 10] are reserved for future use and must be ignored by current implementations. Messages with type less than 1 or greater than 10 must raise an error.
+There are 3 different types of messages: element messages (type 1), credit messages (type 2) and error messages (type 3). Receiving a message with an unknown type must raise an error. The netchan protocol is not extensible.
 
-Element messages carry values from and to user channels. They can be represented and must be encoded as:
+Element messages carry values from and to user channels. They must be encoded as:
 
-	type element struct {
-		id  int           // ID of the channel
-		val reflect.Value // the user data been carried
-		ok  bool          // !ok signals channel closure
-	}
-	// encoded with:
-	var elem element
 	// enc is a gob encoder
-	enc.Encode(header{1, elem.id})
-	enc.EncodeValue(elem.val)
+	enc.Encode(header{1, chanId})
+	enc.EncodeValue(value) // user data
 	enc.Encode(elem.ok)
 
 acknowledgements

@@ -86,7 +86,7 @@ type decError struct {
 	err error
 }
 
-func raiseError(err error) {
+func decPanic(err error) {
 	panic(decError{err})
 }
 
@@ -101,7 +101,7 @@ type decoder struct {
 func (d *decoder) decodeVal(v reflect.Value) {
 	err := d.dec.DecodeValue(v)
 	if err != nil {
-		raiseError(err)
+		decPanic(err)
 	}
 }
 
@@ -112,10 +112,14 @@ func (d *decoder) decode(v interface{}) {
 func (d *decoder) run() {
 	defer d.shutDown()
 	for {
+		if err := d.mn.Error(); err != nil {
+			decPanic(err)
+		}
+
 		var h header
 		d.decode(&h)
 		if h.ChanId < 0 {
-			raiseError(errInvalidId)
+			decPanic(errInvalidId)
 		}
 		switch h.MsgType {
 		case elemMsg:
@@ -123,7 +127,7 @@ func (d *decoder) run() {
 			d.table.RLock()
 			if elem.id >= len(d.table.t) || !d.table.t[elem.id].present {
 				d.table.RUnlock()
-				raiseError(errInvalidId)
+				decPanic(errInvalidId)
 			}
 			elemType := d.table.t[elem.id].ch.Type().Elem()
 			d.table.RUnlock()
@@ -138,7 +142,7 @@ func (d *decoder) run() {
 			cred := credit{id: h.ChanId}
 			d.decode(&cred.incr)
 			if cred.incr <= 0 {
-				raiseError(errInvalidCred)
+				decPanic(errInvalidCred)
 			}
 			if h.MsgType == openMsg {
 				cred.name = new(hashedName)
@@ -149,14 +153,10 @@ func (d *decoder) run() {
 		case errorMsg:
 			var errString string
 			d.decode(&errString)
-			raiseError(errors.New(errString))
+			decPanic(errors.New(errString))
 
 		default:
-			raiseError(errInvalidMsgType)
-		}
-
-		if err := d.mn.Error(); err != nil {
-			raiseError(err)
+			decPanic(errInvalidMsgType)
 		}
 	}
 }
