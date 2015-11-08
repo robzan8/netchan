@@ -18,7 +18,7 @@ A basic netchan session, where a peer sends some integers to the other, looks li
 following (error handling aside).
 
 On the send side:
-	mn := netchan.Manage(conn) // let a netchan.Manager handle the connection
+	mn := netchan.Manage(conn, 0) // let a netchan.Manager handle the connection
 	ch := make(chan int, 5)
 	mn.Open("integers", netchan.Send, ch) // open net-chan "integers" for sending with ch
 	for i := 0; i < n; i++ {
@@ -27,7 +27,7 @@ On the send side:
 	close(ch) // close the net-chan
 
 On the receive side:
-	mn := netchan.Manage(conn)
+	mn := netchan.Manage(conn, 0)
 	ch := make(chan int, 20)
 	mn.Open("integers", netchan.Recv, ch)
 	for i := range ch {
