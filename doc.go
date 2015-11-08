@@ -57,6 +57,7 @@ ErrorSignal and Error are thread safe (like all methods that Manager provides).
 
 Flow control
 
+netchan indipendent flows
 Netchan implements a credit-based flow control algorithm analogous to the one of HTTP/2
 (read this, it affects performance and how you should use the library).
 

@@ -5,10 +5,12 @@ package netchan
 - maybe debug log?
 - more tests
 - fuzzy testing
-- strings in protocol?
-- best ManageLimit API?
+- best Error/CloseConn/ShutDown API?
+	ShutDownWith(err error)?
+	preserve io and det errors?
 
 performance:
+- profile time and memory
 - more sophisticated sender's select
 - more sophisticated credit sender
 */
@@ -74,7 +76,7 @@ func Manage(conn io.ReadWriteCloser) *Manager {
 
 func ManageLimit(conn io.ReadWriteCloser, msgSizeLimit int) *Manager {
 	if msgSizeLimit <= 0 {
-		msgSizeLimit = 1 << 16 // the default value, 64KB
+		msgSizeLimit = 1 << 16 // default value, 64kB
 	}
 
 	send := new(sender)
@@ -189,6 +191,9 @@ func (m *Manager) Open(name string, dir Dir, channel interface{}) error {
 }
 
 func (m *Manager) signalError(err error) {
+	if err == nil {
+		panic("netchan Manager: nil error signaled; this is a bug, please report it")
+	}
 	firstErr := atomic.CompareAndSwapInt64(&m.errState, noErr, settingErr)
 	if !firstErr {
 		return
