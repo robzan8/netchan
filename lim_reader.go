@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"errors"
 	"io"
-	"testing"
 )
 
 // Do not care too much about this file. Hopefully soon the max message size will be
@@ -109,88 +108,4 @@ func (l *limGobReader) ReadByte() (c byte, err error) {
 	_, err = io.ReadFull(l, b[:])
 	c = b[0]
 	return
-}
-
-func TestLimGobReader(t *testing.T) {
-	sideA, sideB := newPipeConn()
-	go sliceProducer(t, sideA)
-	sliceConsumer(t, sideB)
-}
-
-const (
-	limit     = 100 // size limit enforced by sliceConsumer
-	numSlices = 100 // number of slices to send
-)
-
-// sliceProducer sends on "slices". The last slice will be too big.
-func sliceProducer(t *testing.T, conn io.ReadWriteCloser) {
-	mn := Manage(conn)
-	ch := make(chan []byte, 1)
-	err := mn.Open("slices", Send, ch)
-	if err != nil {
-		t.Error(err)
-	}
-	small := make([]byte, limit-10)
-	big := make([]byte, limit+5)
-	for i := 1; i <= numSlices; i++ {
-		slice := small
-		if i == numSlices {
-			slice = big
-		}
-		select {
-		case ch <- slice:
-		case <-mn.ErrorSignal():
-			t.Error(mn.Error())
-		}
-	}
-	close(ch)
-}
-
-// limitGobConn applies a LimGobReader to a connection
-func limitGobConn(conn io.ReadWriteCloser, n int) io.ReadWriteCloser {
-	return struct {
-		*limGobReader
-		io.WriteCloser
-	}{
-		newLimGobReader(conn, n),
-		conn,
-	}
-}
-
-// sliceConsumer receives from "slices" using a LimGobReader.
-// The last slice is too big and must generate errSizeExceeded
-func sliceConsumer(t *testing.T, conn io.ReadWriteCloser) {
-	l := limitGobConn(conn, limit)
-	if _, ok := l.(io.ByteReader); !ok {
-		t.Error("result of limitGobConn is not an io.ByteReader")
-	}
-	mn := Manage(l)
-	// use a receive channel with capacity 1, so that items come
-	// one at a time and we get the error for the last one only
-	ch := make(chan []byte, 1)
-	err := mn.Open("slices", Recv, ch)
-	if err != nil {
-		t.Error(err)
-	}
-	for i := 1; i <= numSlices; i++ {
-		if i < numSlices {
-			select {
-			case <-ch:
-			case <-mn.ErrorSignal():
-				t.Error(mn.Error())
-			}
-			continue
-		}
-		// i == numSlices, expect errSizeExceeded
-		select {
-		case <-ch:
-			t.Error("LimGobReader did not block too big message")
-		case <-mn.ErrorSignal():
-			err := mn.Error()
-			if err.Error() == "netchan Manager: message size limit exceeded" {
-				return // success
-			}
-			t.Error(err)
-		}
-	}
 }

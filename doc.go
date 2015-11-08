@@ -79,8 +79,6 @@ API, no malicious client should be able to:
 	- force the server to allocate a lot of memory
 	- force the server to consume a big amount of CPU time
 
-
-
 Netchan protocol
 
 The netchan protocol is designed to be simple and precise. Every deviation from the protocol causes an

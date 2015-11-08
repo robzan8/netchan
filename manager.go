@@ -1,5 +1,19 @@
 package netchan
 
+/* TODO:
+- more informative errors
+- maybe debug log?
+- more tests
+- fuzzy testing
+- strings in protocol?
+- contribute gob decoder limit
+
+performance:
+- more sophisticated sender's select
+- more sophisticated credit sender
+- parallel enc/dec engines?
+*/
+
 import (
 	"crypto/sha1"
 	"encoding/gob"
@@ -50,15 +64,31 @@ type Manager struct {
 	errSignal chan struct{}
 }
 
+// limitGobConn applies a LimGobReader to a connection
+func limitGobConn(conn io.ReadWriteCloser, n int) io.ReadWriteCloser {
+	return struct {
+		*limGobReader
+		io.WriteCloser
+	}{
+		newLimGobReader(conn, n),
+		conn,
+	}
+}
+
 // Manage function starts a new Manager for the specified connection and returns it.
 // The connection can be any io.ReadWriteCloser that acts like a full duplex connection and
 // ensures reliable and in-order delivery of data, like: TCP, TLS, unix domain sockets,
 // websockets, in-memory io.PipeReader/Writer.
 // On each end, a connection must have only one manager.
-func Manage(conn io.ReadWriteCloser) *Manager {
+func Manage(conn io.ReadWriteCloser, msgSizeLimit int) *Manager {
+	if msgSizeLimit <= 0 {
+		msgSizeLimit = 1 << 16 // the default, 64KB
+	}
+	limConn := limitGobConn(conn, msgSizeLimit)
+
 	send := new(sender)
 	recv := new(receiver)
-	mn := &Manager{conn: conn, send: send, recv: recv}
+	mn := &Manager{conn: limConn, send: send, recv: recv}
 	mn.errSignal = make(chan struct{})
 
 	const chCap int = 8
@@ -76,9 +106,9 @@ func Manage(conn io.ReadWriteCloser) *Manager {
 	credSend := &credSender{toEncoder: sendCredCh, table: recvTab, mn: mn}
 
 	enc := &encoder{elemCh: sendElemCh, creditCh: sendCredCh, mn: mn}
-	enc.enc = gob.NewEncoder(conn)
+	enc.enc = gob.NewEncoder(limConn)
 	dec := &decoder{toReceiver: recvElemCh, toCredRecv: recvCredCh, table: recvTab, mn: mn}
-	dec.dec = gob.NewDecoder(conn)
+	dec.dec = gob.NewDecoder(limConn)
 
 	go send.run()
 	go recv.run()
