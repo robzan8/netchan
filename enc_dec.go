@@ -4,6 +4,7 @@ import (
 	"encoding/gob"
 	"errors"
 	"io"
+	"net"
 	"reflect"
 )
 
@@ -15,11 +16,30 @@ const (
 	creditMsg
 	openMsg
 	errorMsg
+	netErrorMsg
 )
 
 type header struct {
 	MsgType msgType
 	ChanId  int
+}
+
+type netError struct {
+	Err         string
+	IsTimeout   bool
+	IsTemporary bool
+}
+
+func (e *netError) Error() string {
+	return e.Err
+}
+
+func (e *netError) Timeout() bool {
+	return e.IsTimeout
+}
+
+func (e *netError) Temporary() bool {
+	return e.IsTemporary
 }
 
 type encoder struct {
@@ -73,8 +93,15 @@ func (e *encoder) run() {
 			}
 		}
 	}
-	e.encode(header{errorMsg, -1})
-	e.encode(e.mn.Error().Error())
+	err := e.mn.Error()
+	netErr, ok := err.(net.Error)
+	if ok {
+		e.encode(header{netErrorMsg, -1})
+		e.encode(netError{netErr.Error(), netErr.Timeout(), netErr.Temporary()})
+	} else {
+		e.encode(header{errorMsg, -1})
+		e.encode(err.Error())
+	}
 }
 
 var (
@@ -183,7 +210,29 @@ func (d *decoder) run() (err error) {
 			if err != nil {
 				return
 			}
+			switch errString {
+			case io.EOF.Error():
+				return io.EOF
+			case io.ErrClosedPipe.Error():
+				return io.ErrClosedPipe
+			case io.ErrNoProgress.Error():
+				return io.ErrNoProgress
+			case io.ErrShortBuffer.Error():
+				return io.ErrShortBuffer
+			case io.ErrShortWrite.Error():
+				return io.ErrShortWrite
+			case io.ErrUnexpectedEOF.Error():
+				return io.ErrUnexpectedEOF
+			}
 			return errors.New(errString)
+
+		case netErrorMsg:
+			netErr := new(netError)
+			err = d.decode(netErr)
+			if err != nil {
+				return
+			}
+			return netErr
 
 		default:
 			return errInvalidMsgType

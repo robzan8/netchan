@@ -76,7 +76,8 @@ func Manage(conn io.ReadWriteCloser) *Manager {
 
 func ManageLimit(conn io.ReadWriteCloser, msgSizeLimit int) *Manager {
 	if msgSizeLimit <= 0 {
-		msgSizeLimit = 1 << 16 // default value, 64kB
+		// use default
+		msgSizeLimit = 16 * 1024
 	}
 
 	send := new(sender)
