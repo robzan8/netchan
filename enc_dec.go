@@ -83,14 +83,6 @@ var (
 	errInvalidMsgType = errors.New("netchan: message with invalid type received")
 )
 
-type decError struct {
-	err error
-}
-
-func decPanic(err error) {
-	panic(decError{err})
-}
-
 // like io.LimitedReader, but returns a custom error, so that the beginner
 // user can understand that he is receiving too big gob messages
 type limitedReader struct {
@@ -111,38 +103,41 @@ func (l *limitedReader) Read(p []byte) (n int, err error) {
 }
 
 type decoder struct {
-	toReceiver chan<- element
-	toCredRecv chan<- credit
-	table      *recvTable
-	mn         *Manager
-	msgLimit   int
-	limReader  limitedReader
-	dec        *gob.Decoder
+	toReceiver   chan<- element
+	toCredRecv   chan<- credit
+	table        *recvTable
+	mn           *Manager
+	msgSizeLimit int
+	limReader    limitedReader
+	dec          *gob.Decoder
 }
 
-func (d *decoder) decodeVal(v reflect.Value) {
-	d.limReader.N = d.msgLimit // reset the limit before every Decode invocation
-	err := d.dec.DecodeValue(v)
-	if err != nil {
-		decPanic(err)
-	}
+func (d *decoder) decodeVal(v reflect.Value) error {
+	d.limReader.N = d.msgSizeLimit // reset the limit before each Decode invocation
+	return d.dec.DecodeValue(v)
 }
 
-func (d *decoder) decode(v interface{}) {
-	d.decodeVal(reflect.ValueOf(v))
+func (d *decoder) decode(v interface{}) error {
+	return d.decodeVal(reflect.ValueOf(v))
 }
 
-func (d *decoder) run() {
-	defer d.shutDown()
+func (d *decoder) run() (err error) {
+	defer func() { // shutdown on error
+		d.mn.signalError(err)
+		close(d.toReceiver)
+		close(d.toCredRecv)
+	}()
 	for {
-		if err := d.mn.Error(); err != nil {
-			decPanic(err)
+		if err = d.mn.Error(); err != nil {
+			return
 		}
-
 		var h header
-		d.decode(&h)
+		err = d.decode(&h)
+		if err != nil {
+			return
+		}
 		if h.ChanId < 0 {
-			decPanic(errInvalidId)
+			return errInvalidId
 		}
 		switch h.MsgType {
 		case elemMsg:
@@ -150,12 +145,15 @@ func (d *decoder) run() {
 			d.table.RLock()
 			if elem.id >= len(d.table.t) || !d.table.t[elem.id].present {
 				d.table.RUnlock()
-				decPanic(errInvalidId)
+				return errInvalidId
 			}
 			elemType := d.table.t[elem.id].ch.Type().Elem()
 			d.table.RUnlock()
 			elem.val = reflect.New(elemType).Elem()
-			d.decodeVal(elem.val)
+			err = d.decodeVal(elem.val)
+			if err != nil {
+				return
+			}
 			d.toReceiver <- elem
 
 		case closeMsg:
@@ -163,36 +161,32 @@ func (d *decoder) run() {
 
 		case creditMsg, openMsg:
 			cred := credit{id: h.ChanId}
-			d.decode(&cred.incr)
+			err = d.decode(&cred.incr)
+			if err != nil {
+				return
+			}
 			if cred.incr <= 0 {
-				decPanic(errInvalidCred)
+				return errInvalidCred
 			}
 			if h.MsgType == openMsg {
 				cred.name = new(hashedName)
-				d.decode(cred.name)
+				err = d.decode(cred.name)
+				if err != nil {
+					return
+				}
 			}
 			d.toCredRecv <- cred
 
 		case errorMsg:
 			var errString string
-			d.decode(&errString)
-			decPanic(errors.New(errString))
+			err = d.decode(&errString)
+			if err != nil {
+				return
+			}
+			return errors.New(errString)
 
 		default:
-			decPanic(errInvalidMsgType)
+			return errInvalidMsgType
 		}
 	}
-}
-
-func (d *decoder) shutDown() {
-	// we are panicking,
-	// it's the only way the decoder can exit the run loop
-	e := recover()
-	decErr, ok := e.(decError)
-	if !ok {
-		panic(e)
-	}
-	d.mn.signalError(decErr.err)
-	close(d.toReceiver)
-	close(d.toCredRecv)
 }

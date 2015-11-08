@@ -99,12 +99,12 @@ func ManageLimit(conn io.ReadWriteCloser, msgSizeLimit int) *Manager {
 	enc := &encoder{elemCh: sendElemCh, creditCh: sendCredCh, mn: mn}
 	enc.enc = gob.NewEncoder(conn)
 	dec := &decoder{
-		toReceiver: recvElemCh,
-		toCredRecv: recvCredCh,
-		table:      recvTab,
-		mn:         mn,
-		msgLimit:   msgSizeLimit,
-		limReader:  limitedReader{R: conn},
+		toReceiver:   recvElemCh,
+		toCredRecv:   recvCredCh,
+		table:        recvTab,
+		mn:           mn,
+		msgSizeLimit: msgSizeLimit,
+		limReader:    limitedReader{R: conn},
 	}
 	dec.dec = gob.NewDecoder(&dec.limReader)
 
