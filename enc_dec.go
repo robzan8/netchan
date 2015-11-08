@@ -3,6 +3,7 @@ package netchan
 import (
 	"encoding/gob"
 	"errors"
+	"io"
 	"reflect"
 )
 
@@ -90,15 +91,37 @@ func decPanic(err error) {
 	panic(decError{err})
 }
 
+// like io.LimitedReader, but returns a custom error, so that the beginner
+// user can understand that he is receiving too big gob messages
+type limitedReader struct {
+	R io.Reader // underlying reader
+	N int       // max bytes remaining
+}
+
+func (l *limitedReader) Read(p []byte) (n int, err error) {
+	if l.N <= 0 {
+		return 0, errors.New("netchan Manager: too big gob message received")
+	}
+	if len(p) > l.N {
+		p = p[0:l.N]
+	}
+	n, err = l.R.Read(p)
+	l.N -= n
+	return
+}
+
 type decoder struct {
 	toReceiver chan<- element
 	toCredRecv chan<- credit
 	table      *recvTable
 	mn         *Manager
+	msgLimit   int
+	limReader  limitedReader
 	dec        *gob.Decoder
 }
 
 func (d *decoder) decodeVal(v reflect.Value) {
+	d.limReader.N = d.msgLimit // reset the limit before every Decode invocation
 	err := d.dec.DecodeValue(v)
 	if err != nil {
 		decPanic(err)

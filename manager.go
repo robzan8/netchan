@@ -6,12 +6,11 @@ package netchan
 - more tests
 - fuzzy testing
 - strings in protocol?
-- contribute gob decoder limit
+- best ManageLimit API?
 
 performance:
 - more sophisticated sender's select
 - more sophisticated credit sender
-- parallel enc/dec engines?
 */
 
 import (
@@ -99,8 +98,15 @@ func ManageLimit(conn io.ReadWriteCloser, msgSizeLimit int) *Manager {
 
 	enc := &encoder{elemCh: sendElemCh, creditCh: sendCredCh, mn: mn}
 	enc.enc = gob.NewEncoder(conn)
-	dec := &decoder{toReceiver: recvElemCh, toCredRecv: recvCredCh, table: recvTab, mn: mn}
-	dec.dec = gob.NewDecoder(newLimGobReader(conn, msgSizeLimit))
+	dec := &decoder{
+		toReceiver: recvElemCh,
+		toCredRecv: recvCredCh,
+		table:      recvTab,
+		mn:         mn,
+		msgLimit:   msgSizeLimit,
+		limReader:  limitedReader{R: conn},
+	}
+	dec.dec = gob.NewDecoder(&dec.limReader)
 
 	go send.run()
 	go recv.run()

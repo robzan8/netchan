@@ -142,7 +142,7 @@ func TestLimGobReader(t *testing.T) {
 }
 
 const (
-	limit     = 20  // size limit enforced by sliceConsumer
+	limit     = 200 // size limit enforced by sliceConsumer
 	numSlices = 100 // number of slices to send
 )
 
@@ -170,8 +170,9 @@ func sliceProducer(t *testing.T, conn io.ReadWriteCloser) {
 	close(ch)
 }
 
-// sliceConsumer receives from "slices" using a LimGobReader.
-// The last slice is too big and must generate errSizeExceeded
+// sliceConsumer receives from "slices" using a limitedReader. The last slice is too big
+// and must generate an error that matches the one returned by the limitedReader used by
+// the decoder
 func sliceConsumer(t *testing.T, conn io.ReadWriteCloser) {
 	mn := ManageLimit(conn, limit)
 	// use a receive channel with capacity 1, so that items come
@@ -196,7 +197,7 @@ func sliceConsumer(t *testing.T, conn io.ReadWriteCloser) {
 			t.Error("LimGobReader did not block too big message")
 		case <-mn.ErrorSignal():
 			err := mn.Error()
-			if err.Error() == "netchan Manager: message size limit exceeded" {
+			if err.Error() == "netchan Manager: too big gob message received" {
 				return // success
 			}
 			t.Error(err)
