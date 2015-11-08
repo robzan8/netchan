@@ -15,23 +15,31 @@ type bufReader interface {
 	Peek(int) ([]byte, error)
 }
 
-// limGobReader reads gob data from the underlying reader and returns an error when a too big gob message is encountered;
-// subsequent calls to Read will keep returning the error without advancing.
+// limGobReader reads gob data from the underlying reader and returns an error when a too
+// big gob message is encountered; subsequent calls to Read will keep returning the error
+// without advancing.
 type limGobReader struct {
 	r     bufReader // the underlying reader
 	limit uint64    // maximum size of gob message allowed
 	next  int       // counts how many bytes are left before reaching the next message
 }
 
-// newLimGobReader creates a new limGobReader that reads from r, with n as message size limit.
-// If r is not buffered, it is wrapped with a bufio.Reader.
+// newLimGobReader creates a new limGobReader that reads from r, with n as message size
+// limit. If r is not buffered, it is wrapped with a bufio.Reader.
 func newLimGobReader(r io.Reader, n int) *limGobReader {
 	br, ok := r.(bufReader)
 	if !ok {
 		br = bufio.NewReader(r)
 	}
-	if n < 0 {
-		n = 0
+	/*if 0 < n && n < 100 {
+		// with very small n, like 25, the thing breaks. I suspect that the problem is
+		// that it blocks some particular gob message that is used to communicate types
+		// or something
+		n = 100
+	}*/
+	if n <= 0 {
+		// go with the default
+		n = 1 << 16
 	}
 	return &limGobReader{br, uint64(n), 0}
 }
@@ -76,6 +84,7 @@ func (l *limGobReader) readMsgLen(buf []byte) (n int, err error) {
 		uint64Size := 8
 		if width > uint64Size {
 			err = errors.New("netchan limGobReader: unsigned integer out of range")
+			panic(err)
 			return
 		}
 		width++ // +1 for the count byte
@@ -93,6 +102,7 @@ func (l *limGobReader) readMsgLen(buf []byte) (n int, err error) {
 	var tooBig uint64 = 1 << 30 // sanity check of 1GB, as in gob/decoder.go
 	if msgLen > l.limit || msgLen > tooBig {
 		err = errors.New("netchan Manager: message size limit exceeded")
+		panic(err)
 		return
 	}
 	n, err = l.r.Discard(copy(buf, p))

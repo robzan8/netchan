@@ -11,7 +11,7 @@ import (
 // conn would normally be a TCP-like connection to the other peer.
 func emitIntegers(conn io.ReadWriteCloser, n int) {
 	// let a netchan.Manager handle the connection
-	mn := netchan.Manage(conn, 0)
+	mn := netchan.Manage(conn)
 	ch := make(chan int, 10)
 	// open net-chan "integers" for sending with ch
 	mn.Open("integers", netchan.Send, ch)
@@ -23,7 +23,7 @@ func emitIntegers(conn io.ReadWriteCloser, n int) {
 
 // sumIntegers receives the integers from net-chan "integers" and returns their sum.
 func sumIntegers(conn io.ReadWriteCloser) int {
-	mn := netchan.Manage(conn, 0)
+	mn := netchan.Manage(conn)
 	ch := make(chan int, 40)
 	mn.Open("integers", netchan.Recv, ch)
 	sum := 0

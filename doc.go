@@ -18,7 +18,7 @@ A basic netchan session, where a peer sends some integers to the other, looks li
 following (error handling aside).
 
 On the send side:
-	mn := netchan.Manage(conn, 0) // let a netchan.Manager handle the connection
+	mn := netchan.Manage(conn) // let a netchan.Manager handle the connection
 	ch := make(chan int, 5)
 	mn.Open("integers", netchan.Send, ch) // open net-chan "integers" for sending with ch
 	for i := 0; i < n; i++ {
@@ -27,7 +27,7 @@ On the send side:
 	close(ch) // close the net-chan
 
 On the receive side:
-	mn := netchan.Manage(conn, 0)
+	mn := netchan.Manage(conn)
 	ch := make(chan int, 20)
 	mn.Open("integers", netchan.Recv, ch)
 	for i := range ch {
@@ -57,14 +57,15 @@ ErrorSignal and Error are thread safe (like all methods that Manager provides).
 
 Flow control
 
-Netchan implements a credit-based flow control algorithm analogous to the one of HTTP/2.
+Netchan implements a credit-based flow control algorithm analogous to the one of HTTP/2
+(read this, it affects performance and how you should use the library).
 
 Go channels used for receiving from a net-chan must be buffered. For each net-chan, the
 sender has an integer credit that indicates how many free slots there are in the
 receiver's buffer. Each time the sender transmits an item, it decrements the credit by
 one. If the credit becomes zero, the sender must suspend sending items, as the receive
 buffer could be full. On the receive side, when a good number of items have been taken
-out of the channel (and the buffer has new free space), the number is communicated back
+out of the channel (and the buffer is at least half-free), the number is communicated back
 to the sender with an increase credit message.
 
 The receive channel capacity can affect performance: a small buffer could cause the
@@ -78,6 +79,8 @@ API, no malicious client should be able to:
 	- make the server's goroutines panic or deadlock
 	- force the server to allocate a lot of memory
 	- force the server to consume a big amount of CPU time
+
+
 
 Netchan protocol
 

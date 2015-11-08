@@ -86,26 +86,26 @@ func checkIntSlice(t *testing.T, s []int) {
 // start the producer before the consumer
 func TestSendThenRecv(t *testing.T) {
 	sideA, sideB := newPipeConn()
-	intProducer(t, Manage(sideA, 0), "integers", 100)
+	intProducer(t, Manage(sideA), "integers", 100)
 	time.Sleep(50 * time.Millisecond)
-	s := <-intConsumer(t, Manage(sideB, 0), "integers")
+	s := <-intConsumer(t, Manage(sideB), "integers")
 	checkIntSlice(t, s)
 }
 
 // start the consumer before the producer
 func TestRecvThenSend(t *testing.T) {
 	sideA, sideB := newPipeConn()
-	sliceCh := intConsumer(t, Manage(sideB, 0), "integers")
+	sliceCh := intConsumer(t, Manage(sideB), "integers")
 	time.Sleep(50 * time.Millisecond)
-	intProducer(t, Manage(sideA, 0), "integers", 100)
+	intProducer(t, Manage(sideA), "integers", 100)
 	checkIntSlice(t, <-sliceCh)
 }
 
 // open many chans in both directions
 func TestManyChans(t *testing.T) {
 	sideA, sideB := newPipeConn()
-	manA := Manage(sideA, 0)
-	manB := Manage(sideB, 0)
+	manA := Manage(sideA)
+	manB := Manage(sideB)
 	var sliceChans [100]<-chan []int
 	for i := range sliceChans {
 		chName := "integers" + strconv.Itoa(i)
@@ -130,8 +130,8 @@ func TestManyChans(t *testing.T) {
 // TODO: find a better way of testing this
 func TestCredits(t *testing.T) {
 	sideA, sideB := newPipeConn()
-	intProducer(t, Manage(sideA, 0), "integers", 1000)
-	s := <-intConsumer(t, Manage(sideB, 0), "integers")
+	intProducer(t, Manage(sideA), "integers", 1000)
+	s := <-intConsumer(t, Manage(sideB), "integers")
 	checkIntSlice(t, s)
 }
 
@@ -142,13 +142,13 @@ func TestLimGobReader(t *testing.T) {
 }
 
 const (
-	limit     = 100 // size limit enforced by sliceConsumer
+	limit     = 20  // size limit enforced by sliceConsumer
 	numSlices = 100 // number of slices to send
 )
 
 // sliceProducer sends on "slices". The last slice will be too big.
 func sliceProducer(t *testing.T, conn io.ReadWriteCloser) {
-	mn := Manage(conn, 0)
+	mn := Manage(conn)
 	ch := make(chan []byte, 1)
 	err := mn.Open("slices", Send, ch)
 	if err != nil {
@@ -173,7 +173,7 @@ func sliceProducer(t *testing.T, conn io.ReadWriteCloser) {
 // sliceConsumer receives from "slices" using a LimGobReader.
 // The last slice is too big and must generate errSizeExceeded
 func sliceConsumer(t *testing.T, conn io.ReadWriteCloser) {
-	mn := Manage(conn, limit)
+	mn := ManageLimit(conn, limit)
 	// use a receive channel with capacity 1, so that items come
 	// one at a time and we get the error for the last one only
 	ch := make(chan []byte, 1)
