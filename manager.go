@@ -7,7 +7,6 @@ package netchan
 - fuzzy testing
 - best Error/CloseConn/ShutDown API?
 	ShutDownWith(err error)?
-	preserve io and det errors?
 
 performance:
 - profile time and memory
@@ -24,6 +23,7 @@ import (
 	"reflect"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // sha1-hashed name of a net-chan
@@ -52,10 +52,12 @@ type Manager struct {
 	send *sender
 	recv *receiver
 
-	errOnce     sync.Once
+	signalOnce  sync.Once
 	errOccurred int64 // 1 if an error occurred, 0 otherwise
 	err         error
 	errSignal   chan struct{}
+	closeOnce   sync.Once
+	connClosed  chan error
 }
 
 // Manage function starts a new Manager for the specified connection and returns it.
@@ -77,6 +79,7 @@ func ManageLimit(conn io.ReadWriteCloser, msgSizeLimit int) *Manager {
 	recv := new(receiver)
 	mn := &Manager{conn: conn, send: send, recv: recv}
 	mn.errSignal = make(chan struct{})
+	mn.connClosed = make(chan error, 1)
 
 	const chCap int = 8
 	sendElemCh := make(chan element, chCap)
@@ -179,7 +182,7 @@ func (m *Manager) Open(name string, dir Dir, channel interface{}) error {
 }
 
 func (m *Manager) signalError(err error) {
-	m.errOnce.Do(func() {
+	m.signalOnce.Do(func() {
 		m.err = err
 		atomic.StoreInt64(&m.errOccurred, 1)
 		close(m.errSignal)
@@ -216,5 +219,11 @@ func (m *Manager) ShutDown() error {
 }
 
 func (m *Manager) ShutDownWith(err error) error {
-	return m.conn.Close()
+	m.signalError(err)
+	select {
+	case <-m.connClosed:
+		return m.closeErr
+	case <-time.After(5 * time.Second):
+		return m.conn.Close()
+	}
 }

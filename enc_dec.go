@@ -102,6 +102,8 @@ func (e *encoder) run() {
 		e.encode(header{errorMsg, -1})
 		e.encode(err.Error())
 	}
+	e.mn.closeErr = e.mn.conn.Close()
+	close(e.mn.connClosed)
 }
 
 var (
