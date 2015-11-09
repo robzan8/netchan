@@ -20,7 +20,6 @@ import (
 	"fmt"
 	"io"
 	"reflect"
-	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -44,6 +43,36 @@ type credit struct {
 	name *hashedName
 }
 
+// once is a custom implementation of sync.Once.
+// various methods need access to its private fields.
+// Note: done field needs initialization.
+type once struct {
+	done  chan struct{}
+	state int32
+}
+
+// once state
+const (
+	onceNotDone int32 = iota
+	onceDoing
+	onceDone
+)
+
+func (o *once) Do(f func()) {
+	if atomic.LoadInt32(&o.state) == onceDone {
+		return
+	}
+	// Slow path.
+	first := atomic.CompareAndSwapInt32(&o.state, onceNotDone, onceDoing)
+	if !first {
+		<-o.done
+		return
+	}
+	f()
+	atomic.StoreInt32(&o.state, onceDone)
+	close(o.done)
+}
+
 // A Manager handles the message traffic of its connection,
 // implementing the netchan protocol.
 type Manager struct {
@@ -51,14 +80,8 @@ type Manager struct {
 	send *sender
 	recv *receiver
 
-	errOnce     sync.Once
-	err         error
-	errOccurred int32 // 1 if an error occurred, 0 otherwise
-	errSignal   chan struct{}
-
-	closeOnce   sync.Once
-	closeErr    error
-	closeSignal chan struct{}
+	errOnce, closeOnce once
+	err, closeErr      error
 }
 
 // Manage function starts a new Manager for the specified connection and returns it.
@@ -79,8 +102,8 @@ func ManageLimit(conn io.ReadWriteCloser, msgSizeLimit int) *Manager {
 	send := new(sender)
 	recv := new(receiver)
 	mn := &Manager{conn: conn, send: send, recv: recv}
-	mn.errSignal = make(chan struct{})
-	mn.closeSignal = make(chan struct{})
+	mn.errOnce.done = make(chan struct{})
+	mn.closeOnce.done = make(chan struct{})
 
 	const chCap int = 8
 	sendElemCh := make(chan element, chCap)
@@ -185,8 +208,6 @@ func (m *Manager) Open(name string, dir Dir, channel interface{}) error {
 func (m *Manager) signalError(err error) {
 	m.errOnce.Do(func() {
 		m.err = err
-		atomic.StoreInt32(&m.errOccurred, 1)
-		close(m.errSignal)
 	})
 }
 
@@ -200,10 +221,10 @@ func (m *Manager) signalError(err error) {
 //
 // See the basic package example for error handling.
 func (m *Manager) Error() error {
-	if atomic.LoadInt32(&m.errOccurred) == 0 {
-		return nil
+	if atomic.LoadInt32(&m.errOnce.state) == onceDone {
+		return m.err
 	}
-	return m.err
+	return nil
 }
 
 // ErrorSignal returns a channel that never receives any message and is closed when an
@@ -212,7 +233,13 @@ func (m *Manager) Error() error {
 // See the basic package example for error handling.
 func (m *Manager) ErrorSignal() <-chan struct{} {
 	// make this scale with multiple channels?
-	return m.errSignal
+	return m.errOnce.done
+}
+
+func (m *Manager) closeConn() {
+	m.closeOnce.Do(func() {
+		m.closeErr = m.conn.Close()
+	})
 }
 
 func (m *Manager) ShutDown() error {
@@ -222,16 +249,9 @@ func (m *Manager) ShutDown() error {
 func (m *Manager) ShutDownWith(err error) error {
 	m.signalError(err)
 	select {
-	case <-m.closeSignal:
+	case <-m.closeOnce.done:
 	case <-time.After(5 * time.Second):
 		m.closeConn()
 	}
 	return m.closeErr
-}
-
-func (m *Manager) closeConn() {
-	m.closeOnce.Do(func() {
-		m.closeErr = m.conn.Close()
-		close(m.closeSignal)
-	})
 }
