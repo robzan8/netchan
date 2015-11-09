@@ -135,7 +135,7 @@ func (r *credReceiver) run() {
 			err = r.handleInitCred(cred)
 		}
 		if err != nil {
-			r.mn.signalError(err)
+			go r.mn.ShutDownWith(err)
 		}
 	}
 }

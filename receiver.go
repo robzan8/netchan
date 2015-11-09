@@ -102,7 +102,7 @@ func (r *receiver) run() {
 		}
 		err := r.handleElem(elem)
 		if err != nil {
-			r.mn.signalError(err)
+			go r.mn.ShutDownWith(err)
 		}
 	}
 }

@@ -82,6 +82,33 @@ type Manager struct {
 	err, closeErr      error
 }
 
+/*
+ ----> +----------+       +---------+       +---------+       +----------+ ---->
+ ----> |  sender  | ----> | encoder | ====> | decoder | ----> | receiver | ---->
+ ----> +----------+       +---------+       +---------+       +----------+ ---->
+       [send table]                                           [recv table]
+       +----------+       +---------+       +---------+       +----------+
+       | credRecv | <---- | decoder | <==== | encoder | <---- | credSend |
+       +----------+       +---------+       +---------+       +----------+
+
+
+ ----> +----------+                                                   +----------+ ---->
+ ----> │  sender  | ---\                                         /--> | receiver | ---->
+ ----> +----------+     \                                       /     +----------+ ---->
+       [send table]      \--> +---------+       +---------+ ---/      [recv table]
+       +----------+           | encoder | ====> | decoder |           +----------+
+       | credRecv | <-\   /-> +---------+       +---------+ --\   /-- | credSend |
+       +----------+    \ /                                     \ /    +----------+
+                        X                                       X
+       +----------+    / \                                     / \    +----------+
+       | credSend | --/   \-- +---------+       +---------+ <-/   \-> | credRecv |
+       +----------+           | decoder | <==== | encoder |           +----------+
+       [recv table]      /--- +---------+       +---------+ <--\      [send table]
+ <---- +----------+     /                                       \     +----------+ <----
+ <---- | receiver | <--/                                         \--- |  sender  | <----
+ <---- +----------+                                                   +----------+ <----
+*/
+
 // Manage function starts a new Manager for the specified connection and returns it.
 // The connection can be any io.ReadWriteCloser that acts like a full duplex connection and
 // ensures reliable and in-order delivery of data, like: TCP, TLS, unix domain sockets,
@@ -203,15 +230,6 @@ func (m *Manager) Open(name string, dir Dir, channel interface{}) error {
 	return nil
 }
 
-func (m *Manager) signalError(err error) {
-	if err == nil {
-		panic("netchan Manager: nil error signaled; this is a bug, please report")
-	}
-	m.errOnce.Do(func() {
-		m.err = err
-	})
-}
-
 // Error returns the first error that occurred on this manager. If no error
 // occurred, it returns nil.
 //
@@ -251,10 +269,15 @@ func (m *Manager) ShutDownWith(Error error) error {
 	if Error == nil {
 		Error = io.EOF
 	}
-	m.signalError(Error)
+	m.errOnce.Do(func() {
+		m.err = Error
+	})
 	select {
+	// encoder tries to send error to peer; if/when it succeeds,
+	// it closes the connection and we wake up and return
 	case <-m.closeOnce.done:
-	// this timeout should take into account the whole pipeline from
+	// if encoder takes too long, we close the connection ourself;
+	// this timeout should take into account the whole pipeline from the
 	// sender's select to the encoder sending the error message to peer
 	case <-time.After(5 * time.Second):
 		m.closeConn()

@@ -57,7 +57,7 @@ func (e *encoder) encodeVal(v reflect.Value) {
 	}
 	e.err = e.enc.EncodeValue(v)
 	if e.err != nil {
-		e.mn.signalError(e.err)
+		go e.mn.ShutDownWith(e.err)
 	}
 }
 
@@ -94,7 +94,6 @@ func (e *encoder) run() {
 		}
 	}
 	err := e.mn.Error()
-	// communicate only if error generated locally
 	netErr, ok := err.(net.Error)
 	if ok {
 		e.encode(header{netErrorMsg, -1})
@@ -152,8 +151,9 @@ func (d *decoder) decode(v interface{}) error {
 }
 
 func (d *decoder) run() (err error) {
-	defer func() { // shutdown on error
-		d.mn.signalError(err)
+	// run returns only in case of error/shutdown
+	defer func() {
+		go d.mn.ShutDownWith(err)
 		close(d.toReceiver)
 		close(d.toCredRecv)
 	}()
