@@ -94,6 +94,7 @@ func (e *encoder) run() {
 		}
 	}
 	err := e.mn.Error()
+	// communicate only if error generated locally
 	netErr, ok := err.(net.Error)
 	if ok {
 		e.encode(header{netErrorMsg, -1})
@@ -102,8 +103,7 @@ func (e *encoder) run() {
 		e.encode(header{errorMsg, -1})
 		e.encode(err.Error())
 	}
-	e.mn.closeErr = e.mn.conn.Close()
-	close(e.mn.connClosed)
+	e.mn.closeConn()
 }
 
 var (

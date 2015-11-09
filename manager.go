@@ -5,8 +5,7 @@ package netchan
 - maybe debug log?
 - more tests
 - fuzzy testing
-- best Error/CloseConn/ShutDown API?
-	ShutDownWith(err error)?
+- define shutdown protocol
 
 performance:
 - profile time and memory
@@ -52,12 +51,14 @@ type Manager struct {
 	send *sender
 	recv *receiver
 
-	signalOnce  sync.Once
-	errOccurred int64 // 1 if an error occurred, 0 otherwise
+	errOnce     sync.Once
 	err         error
+	errOccurred int32 // 1 if an error occurred, 0 otherwise
 	errSignal   chan struct{}
+
 	closeOnce   sync.Once
-	connClosed  chan error
+	closeErr    error
+	closeSignal chan struct{}
 }
 
 // Manage function starts a new Manager for the specified connection and returns it.
@@ -79,7 +80,7 @@ func ManageLimit(conn io.ReadWriteCloser, msgSizeLimit int) *Manager {
 	recv := new(receiver)
 	mn := &Manager{conn: conn, send: send, recv: recv}
 	mn.errSignal = make(chan struct{})
-	mn.connClosed = make(chan error, 1)
+	mn.closeSignal = make(chan struct{})
 
 	const chCap int = 8
 	sendElemCh := make(chan element, chCap)
@@ -182,9 +183,9 @@ func (m *Manager) Open(name string, dir Dir, channel interface{}) error {
 }
 
 func (m *Manager) signalError(err error) {
-	m.signalOnce.Do(func() {
+	m.errOnce.Do(func() {
 		m.err = err
-		atomic.StoreInt64(&m.errOccurred, 1)
+		atomic.StoreInt32(&m.errOccurred, 1)
 		close(m.errSignal)
 	})
 }
@@ -199,7 +200,7 @@ func (m *Manager) signalError(err error) {
 //
 // See the basic package example for error handling.
 func (m *Manager) Error() error {
-	if atomic.LoadInt64(&m.errOccurred) == 0 {
+	if atomic.LoadInt32(&m.errOccurred) == 0 {
 		return nil
 	}
 	return m.err
@@ -221,9 +222,16 @@ func (m *Manager) ShutDown() error {
 func (m *Manager) ShutDownWith(err error) error {
 	m.signalError(err)
 	select {
-	case <-m.connClosed:
-		return m.closeErr
+	case <-m.closeSignal:
 	case <-time.After(5 * time.Second):
-		return m.conn.Close()
+		m.closeConn()
 	}
+	return m.closeErr
+}
+
+func (m *Manager) closeConn() {
+	m.closeOnce.Do(func() {
+		m.closeErr = m.conn.Close()
+		close(m.closeSignal)
+	})
 }
