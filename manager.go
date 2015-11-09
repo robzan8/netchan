@@ -43,9 +43,7 @@ type credit struct {
 	name *hashedName
 }
 
-// once is a custom implementation of sync.Once.
-// various methods need access to its private fields.
-// Note: done field needs initialization.
+// once is an implementation of sync.Once that uses a channel.
 type once struct {
 	done  chan struct{}
 	state int32
@@ -54,8 +52,8 @@ type once struct {
 // once state
 const (
 	onceNotDone int32 = iota
-	onceDoing
 	onceDone
+	onceDoing
 )
 
 func (o *once) Do(f func()) {
@@ -63,8 +61,8 @@ func (o *once) Do(f func()) {
 		return
 	}
 	// Slow path.
-	first := atomic.CompareAndSwapInt32(&o.state, onceNotDone, onceDoing)
-	if !first {
+	won := atomic.CompareAndSwapInt32(&o.state, onceNotDone, onceDoing)
+	if !won {
 		<-o.done
 		return
 	}
@@ -206,6 +204,9 @@ func (m *Manager) Open(name string, dir Dir, channel interface{}) error {
 }
 
 func (m *Manager) signalError(err error) {
+	if err == nil {
+		panic("netchan Manager: nil error signaled; this is a bug, please report")
+	}
 	m.errOnce.Do(func() {
 		m.err = err
 	})
@@ -246,10 +247,15 @@ func (m *Manager) ShutDown() error {
 	return m.ShutDownWith(io.EOF)
 }
 
-func (m *Manager) ShutDownWith(err error) error {
-	m.signalError(err)
+func (m *Manager) ShutDownWith(Error error) error {
+	if Error == nil {
+		Error = io.EOF
+	}
+	m.signalError(Error)
 	select {
 	case <-m.closeOnce.done:
+	// this timeout should take into account the whole pipeline from
+	// sender's select to the encoder sending the error message to peer
 	case <-time.After(5 * time.Second):
 		m.closeConn()
 	}

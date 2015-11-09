@@ -103,6 +103,7 @@ func (e *encoder) run() {
 		e.encode(header{errorMsg, -1})
 		e.encode(err.Error())
 	}
+	// error message in flight can be discarded?
 	e.mn.closeConn()
 }
 
