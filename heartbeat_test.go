@@ -25,22 +25,22 @@ of dedicated goroutines and channels that will keep going independently from the
 channels used to communicate data.
 */
 
-// interval at which heartbeats are sent. Would be much bigger for real
-// network connections
+// Interval at which heartbeats are sent.
+// Would be much bigger for real network connections.
 const hbInterval = 50 * time.Millisecond
 
-// if sending or receiving takes more than hbTimeout, the connection is
-// considered dead. The timeout would normally be more permissive, like
-// hbTimeout = 3 * hbInterval
+// Timeout after which the connection is considered dead.
+// Would normally be more permissive, like hbTimeout = 3 * hbInterval
 const hbTimeout = time.Duration(1.2 * float64(hbInterval))
 
 // recvHeartbeat keeps receiving heartbeats
 func recvHeartbeat(hb <-chan struct{}, mn *netchan.Manager) {
 	for {
-		// check the error signal while receiving (and sending) messages,
-		// otherwise the operation can block forever in case of error
 		select {
-		case <-hb:
+		case _, ok := <-hb:
+			if !ok {
+				log.Fatal("heartbeat net-chan was closed")
+			}
 		case <-mn.ErrorSignal():
 			log.Fatal(mn.Error())
 		case <-time.After(hbTimeout):
@@ -78,14 +78,14 @@ func heartbeatPeer(conn io.ReadWriteCloser) {
 	mn := netchan.Manage(conn)
 	// the same manager is used to open both channels.
 	// On each end, a connection must have only one manager
-	recv := make(chan struct{}, 1)
+	recv := make(chan struct{}, 4)
 	err := mn.Open("heartbeat", netchan.Recv, recv)
 	if err != nil {
 		log.Fatal(err)
 	}
 	go recvHeartbeat(recv, mn)
 
-	send := make(chan struct{}, 1)
+	send := make(chan struct{}, 4)
 	err = mn.Open("heartbeat", netchan.Send, send)
 	if err != nil {
 		log.Fatal(err)
@@ -94,7 +94,6 @@ func heartbeatPeer(conn io.ReadWriteCloser) {
 }
 
 // This example shows how to add heartbeats to a netchan session.
-// It also shows how to handle errors.
 func Example_heartbeats() {
 	sideA, sideB := newPipeConn()
 	go heartbeatPeer(sideA)
