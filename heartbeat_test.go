@@ -1,6 +1,7 @@
 package netchan_test
 
 import (
+	"errors"
 	"io"
 	"log"
 	"time"
@@ -41,13 +42,11 @@ func recvHeartbeat(hb <-chan struct{}, mn *netchan.Manager) {
 		select {
 		case <-hb:
 		case <-mn.ErrorSignal():
-			// when an error occurs, close the connection, so that the manager's
-			// goroutines that are eventually stuck reading or writing can return
-			mn.CloseConn()
 			log.Fatal(mn.Error())
 		case <-time.After(hbTimeout):
-			mn.CloseConn()
-			log.Fatal("heartbeat receive took too long")
+			err := errors.New("heartbeat receive took too long")
+			mn.ShutDownWith(err)
+			log.Fatal(err)
 		}
 		time.Sleep(hbInterval)
 	}
@@ -59,11 +58,11 @@ func sendHeartbeat(hb chan<- struct{}, mn *netchan.Manager) {
 		select {
 		case hb <- struct{}{}:
 		case <-mn.ErrorSignal():
-			mn.CloseConn()
 			log.Fatal(mn.Error())
 		case <-time.After(hbTimeout):
-			mn.CloseConn()
-			log.Fatal("heartbeat send took too long")
+			err := errors.New("heartbeat send took too long")
+			mn.ShutDownWith(err)
+			log.Fatal(err)
 		}
 		time.Sleep(hbInterval)
 	}

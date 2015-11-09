@@ -45,24 +45,17 @@ type credit struct {
 	name *hashedName
 }
 
-// for Manager.errState
-const (
-	noErr int64 = iota
-	settingErr
-	errSet
-)
-
 // A Manager handles the message traffic of its connection,
 // implementing the netchan protocol.
 type Manager struct {
-	closeConnMu sync.Mutex
-	conn        io.ReadWriteCloser
-	send        *sender
-	recv        *receiver
+	conn io.ReadWriteCloser
+	send *sender
+	recv *receiver
 
-	errState  int64
-	err       error
-	errSignal chan struct{}
+	errOnce     sync.Once
+	errOccurred int64 // 1 if an error occurred, 0 otherwise
+	err         error
+	errSignal   chan struct{}
 }
 
 // Manage function starts a new Manager for the specified connection and returns it.
@@ -77,7 +70,7 @@ func Manage(conn io.ReadWriteCloser) *Manager {
 func ManageLimit(conn io.ReadWriteCloser, msgSizeLimit int) *Manager {
 	if msgSizeLimit <= 0 {
 		// use default
-		msgSizeLimit = 16 * 1024
+		msgSizeLimit = 32 * 1024
 	}
 
 	send := new(sender)
@@ -118,12 +111,6 @@ func ManageLimit(conn io.ReadWriteCloser, msgSizeLimit int) *Manager {
 	go enc.run()
 	go dec.run()
 	return mn
-}
-
-func (m *Manager) CloseConn() error {
-	m.closeConnMu.Lock()
-	defer m.closeConnMu.Unlock()
-	return m.conn.Close()
 }
 
 // The direction of a net-chan from the client's perspective.
@@ -192,16 +179,11 @@ func (m *Manager) Open(name string, dir Dir, channel interface{}) error {
 }
 
 func (m *Manager) signalError(err error) {
-	if err == nil {
-		panic("netchan Manager: nil error signaled; this is a bug, please report it")
-	}
-	firstErr := atomic.CompareAndSwapInt64(&m.errState, noErr, settingErr)
-	if !firstErr {
-		return
-	}
-	m.err = err
-	atomic.StoreInt64(&m.errState, errSet)
-	close(m.errSignal)
+	m.errOnce.Do(func() {
+		m.err = err
+		atomic.StoreInt64(&m.errOccurred, 1)
+		close(m.errSignal)
+	})
 }
 
 // Error returns the first error that occurred on this manager. If no error
@@ -214,10 +196,10 @@ func (m *Manager) signalError(err error) {
 //
 // See the basic package example for error handling.
 func (m *Manager) Error() error {
-	if atomic.LoadInt64(&m.errState) == errSet {
-		return m.err
+	if atomic.LoadInt64(&m.errOccurred) == 0 {
+		return nil
 	}
-	return nil
+	return m.err
 }
 
 // ErrorSignal returns a channel that never receives any message and is closed when an
@@ -227,4 +209,12 @@ func (m *Manager) Error() error {
 func (m *Manager) ErrorSignal() <-chan struct{} {
 	// make this scale with multiple channels?
 	return m.errSignal
+}
+
+func (m *Manager) ShutDown() error {
+	return m.ShutDownWith(io.EOF)
+}
+
+func (m *Manager) ShutDownWith(err error) error {
+	return m.conn.Close()
 }
