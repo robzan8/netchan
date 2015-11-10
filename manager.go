@@ -5,12 +5,12 @@ package netchan
 - maybe debug log?
 - more tests
 - fuzzy testing
-- define shutdown protocol
 
 performance:
 - profile time and memory
 - more sophisticated sender's select
 - more sophisticated credit sender
+- adjust ShutDown timeout
 */
 
 import (
@@ -227,7 +227,6 @@ func (m *Manager) Open(name string, dir Dir, channel interface{}) error {
 		return m.send.open(name, ch)
 	}
 	return errors.New("netchan Open: dir is not Recv nor Send")
-	return nil
 }
 
 // Error returns the first error that occurred on this manager. If no error

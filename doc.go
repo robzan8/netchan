@@ -11,7 +11,7 @@ connection and received on the other side; but it is possible to open multiple n
 in both directions, on a single connection.
 
 The connection can be any io.ReadWriteCloser like a TCP connection or unix domain
-socket. The user is in charge of establishing the connection, which is then handed over
+sockets. The user is in charge of establishing the connection, which is then handed over
 to a netchan.Manager.
 
 A basic netchan session, where a peer sends some integers to the other, looks like the
@@ -20,7 +20,7 @@ following (error handling aside).
 On the send side:
 	mn := netchan.Manage(conn) // let a netchan.Manager handle the connection
 	ch := make(chan int, 5)
-	mn.Open("integers", netchan.Send, ch) // open net-chan "integers" for sending through ch
+	err := mn.Open("integers", netchan.Send, ch) // open net-chan "integers" for sending through ch
 	for i := 0; i < n; i++ {
 		ch <- i
 	}
@@ -29,21 +29,23 @@ On the send side:
 On the receive side:
 	mn := netchan.Manage(conn)
 	ch := make(chan int, 20)
-	mn.Open("integers", netchan.Recv, ch)
+	err := mn.Open("integers", netchan.Recv, ch)
 	for i := range ch {
 		fmt.Println(i)
 	}
+
+All methods that Manager provides are thread-safe.
 
 Netchan uses gob to serialize messages (https://golang.org/pkg/encoding/gob/). Any data
 to be transmitted using netchan must obey gob's laws.
 
 Error handling
 
-When a manager shuts down (because the connection is closed or because of an error), your
-goroutines can hang forever trying to receive or send on a net-chan. For this reason,
+When a manager shuts down (because ShutDown is called or because of an error), some
+goroutines could hang forever trying to receive or send on a net-chan. For this reason,
 Manager provides the methods ErrorSignal and Error. ErrorSignal returns a channel that
 never gets any message and is closed when an error occurs; Error returns the error that
-occurred (or nil, if no error happened). Their intended use:
+occurred. Their intended use:
 
 	// sending on a net-chan (receiving is analogous):
 	select {
@@ -53,30 +55,25 @@ occurred (or nil, if no error happened). Their intended use:
 		log.Fatal(mn.Error())
 	}
 
-ErrorSignal and Error are thread safe (like all methods that Manager provides).
-
 Flow control
 
-netchan indipendent flows
-Netchan implements a credit-based flow control algorithm analogous to the one of HTTP/2
-(read this, it affects performance and how you should use the library).
+Net-chans are independent of each other: an idle channel does not prevent progress on the
+others. This is achieved with a credit-based flow control system analogous to the one of
+HTTP/2.
 
-Go channels used for receiving from a net-chan must be buffered. For each net-chan, the
-sender has an integer credit that indicates how many free slots there are in the
-receiver's buffer. Each time the sender transmits an item, it decrements the credit by
-one. If the credit becomes zero, the sender must suspend sending items, as the receive
-buffer could be full. On the receive side, when a good number of items have been taken
-out of the channel (and the buffer is at least half-free), the number is communicated back
-to the sender with an increase credit message.
+Go channels used for receiving must be buffered. For each net-chan, the receiver
+communicates to the sender when there is new free space in the buffer, with credit
+messages. The sender must never transmit more than its credit allows.
 
 The receive channel capacity can affect performance: a small buffer could cause the
-sender to suspend often; a big buffer could avoid suspensions completely.
+sender to suspend often, waiting for credit; a big buffer could avoid suspensions
+completely.
 
 Security
 
-The netchan protocol is designed to be secure, is very simple and is tested also with
-go-fuzz (https://github.com/dvyukov/go-fuzz). Given a server that exposes a netchan-based
-API, no malicious client should be able to:
+The netchan protocol is designed to be secure, is extremely simple and is tested also
+with go-fuzz (https://github.com/dvyukov/go-fuzz). Given a server that exposes a
+netchan-based API, no malicious client should be able to:
 	- make the server's goroutines panic or deadlock
 	- force the server to allocate a lot of memory
 	- force the server to consume a big amount of CPU time
