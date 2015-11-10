@@ -96,10 +96,10 @@ func (e *encoder) run() {
 	err := e.mn.Error()
 	netErr, ok := err.(net.Error)
 	if ok {
-		e.encode(header{netErrorMsg, -1})
+		e.encode(header{MsgType: netErrorMsg})
 		e.encode(netError{netErr.Error(), netErr.Timeout(), netErr.Temporary()})
 	} else {
-		e.encode(header{errorMsg, -1})
+		e.encode(header{MsgType: errorMsg})
 		e.encode(err.Error())
 	}
 	// error message in flight can be discarded?

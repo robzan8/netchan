@@ -29,7 +29,7 @@ func client(conn io.ReadWriteCloser) {
 	case <-mn.ErrorSignal():
 		log.Fatal(mn.Error())
 	}
-	//close(reqCh)
+	close(reqCh)
 
 	respCh := make(chan int, 20)
 	err = mn.Open(req.RespCh, netchan.Recv, respCh)
@@ -78,7 +78,7 @@ func server(conn io.ReadWriteCloser) {
 			log.Fatal(mn.Error())
 		}
 	}
-	//close(respCh)
+	close(respCh)
 
 	// wait that client receives everything and shuts down
 	<-mn.ErrorSignal()
