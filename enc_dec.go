@@ -213,19 +213,8 @@ func (d *decoder) run() (err error) {
 			if err != nil {
 				return
 			}
-			switch errString {
-			case io.EOF.Error():
+			if errString == io.EOF.Error() {
 				return io.EOF
-			case io.ErrClosedPipe.Error():
-				return io.ErrClosedPipe
-			case io.ErrNoProgress.Error():
-				return io.ErrNoProgress
-			case io.ErrShortBuffer.Error():
-				return io.ErrShortBuffer
-			case io.ErrShortWrite.Error():
-				return io.ErrShortWrite
-			case io.ErrUnexpectedEOF.Error():
-				return io.ErrUnexpectedEOF
 			}
 			return errors.New(errString)
 
