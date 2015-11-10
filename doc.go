@@ -20,7 +20,7 @@ following (error handling aside).
 On the send side:
 	mn := netchan.Manage(conn) // let a netchan.Manager handle the connection
 	ch := make(chan int, 5)
-	mn.Open("integers", netchan.Send, ch) // open net-chan "integers" for sending with ch
+	mn.Open("integers", netchan.Send, ch) // open net-chan "integers" for sending through ch
 	for i := 0; i < n; i++ {
 		ch <- i
 	}

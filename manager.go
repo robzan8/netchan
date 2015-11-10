@@ -265,12 +265,12 @@ func (m *Manager) ShutDown() error {
 	return m.ShutDownWith(io.EOF)
 }
 
-func (m *Manager) ShutDownWith(Error error) error {
-	if Error == nil {
-		Error = io.EOF
+func (m *Manager) ShutDownWith(err error) error {
+	if err == nil {
+		err = io.EOF
 	}
 	m.errOnce.Do(func() {
-		m.err = Error
+		m.err = err
 	})
 	select {
 	// encoder tries to send error to peer; if/when it succeeds,

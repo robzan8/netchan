@@ -3,34 +3,88 @@ package netchan_test
 import (
 	"fmt"
 	"io"
+	"log"
 
 	"github.com/robzan8/netchan"
 )
 
+type request struct {
+	N      int
+	RespCh string
+}
+
 // emitIntegers sends the integers from 1 to n on net-chan "integers".
 // conn would normally be a TCP-like connection to the other peer.
-func emitIntegers(conn io.ReadWriteCloser, n int) {
-	// let a netchan.Manager handle the connection
+func client(conn io.ReadWriteCloser) {
 	mn := netchan.Manage(conn)
-	ch := make(chan int, 10)
-	// open net-chan "integers" for sending with ch
-	mn.Open("integers", netchan.Send, ch)
-	for i := 1; i <= n; i++ {
-		ch <- i
+
+	reqCh := make(chan request)
+	err := mn.Open("requests", netchan.Send, reqCh)
+	if err != nil {
+		log.Fatal(err)
 	}
-	close(ch) // the other peer's receiving channel will be closed
+	req := request{100, "response 0"}
+	select {
+	case reqCh <- req:
+	case <-mn.ErrorSignal():
+		log.Fatal(mn.Error())
+	}
+	//close(reqCh)
+
+	respCh := make(chan int, 20)
+	err = mn.Open(req.RespCh, netchan.Recv, respCh)
+	if err != nil {
+		log.Fatal(err)
+	}
+	for i := 0; i < req.N; i++ {
+		select {
+		case num := <-respCh:
+			if num == 99 {
+				fmt.Println(num)
+			}
+		case <-mn.ErrorSignal():
+			log.Fatal(mn.Error())
+		}
+	}
+
+	mn.ShutDown()
 }
 
 // sumIntegers receives the integers from net-chan "integers" and returns their sum.
-func sumIntegers(conn io.ReadWriteCloser) int {
+func server(conn io.ReadWriteCloser) {
 	mn := netchan.Manage(conn)
-	ch := make(chan int, 40)
-	mn.Open("integers", netchan.Recv, ch)
-	sum := 0
-	for i := range ch {
-		sum += i
+
+	reqCh := make(chan request, 10)
+	err := mn.Open("requests", netchan.Recv, reqCh)
+	if err != nil {
+		log.Fatal(err)
 	}
-	return sum
+	var req request
+	select {
+	case req = <-reqCh:
+	case <-mn.ErrorSignal():
+		log.Fatal(mn.Error())
+	}
+
+	respCh := make(chan int)
+	err = mn.Open(req.RespCh, netchan.Send, respCh)
+	if err != nil {
+		log.Fatal(err)
+	}
+	for i := 0; i < req.N; i++ {
+		select {
+		case respCh <- i:
+		case <-mn.ErrorSignal():
+			log.Fatal(mn.Error())
+		}
+	}
+	//close(respCh)
+
+	// wait that client receives everything and shuts down
+	<-mn.ErrorSignal()
+	if err := mn.Error(); err != io.EOF {
+		log.Fatal(err)
+	}
 }
 
 // This example shows a basic netchan session: two peers establish a connection and
@@ -38,10 +92,9 @@ func sumIntegers(conn io.ReadWriteCloser) int {
 // net-chan for sending; peer 2 opens the same net-chan (by name) for receiving;
 // the peers communicate using the Go channels associated with the net-chans.
 // Warning: this example does not include error handling.
-func Example_basic() {
+func Example_requestResponse() {
 	sideA, sideB := newPipeConn() // a connection based on io.PipeReader/Writer
-	go emitIntegers(sideA, 100)
-	sum := sumIntegers(sideB)
-	fmt.Println(sum)
-	// Output: 5050
+	go client(sideA)
+	server(sideB)
+	// Output: 99
 }
