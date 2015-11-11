@@ -8,43 +8,38 @@ import (
 	"github.com/robzan8/netchan"
 )
 
+func checkErrors(mn *netchan.Manager) {
+	<-mn.ErrorSignal()
+	if err := mn.Error(); err != io.EOF {
+		log.Fatal(err)
+	}
+}
+
 type request struct {
-	N      int
-	RespCh string
+	N          int
+	RespChName string
 }
 
 // emitIntegers sends the integers from 1 to n on net-chan "integers".
 // conn would normally be a TCP-like connection to the other peer.
 func client(conn io.ReadWriteCloser) {
 	mn := netchan.Manage(conn)
+	go checkErrors(mn)
 
-	reqCh := make(chan request)
+	reqCh := make(chan request, 1)
 	err := mn.Open("requests", netchan.Send, reqCh)
 	if err != nil {
 		log.Fatal(err)
 	}
-	req := request{100, "response 0"}
-	select {
-	case reqCh <- req:
-	case <-mn.ErrorSignal():
-		log.Fatal(mn.Error())
-	}
-	close(reqCh)
+	reqCh <- request{10, "response chan 0"}
 
-	respCh := make(chan int, 20)
-	err = mn.Open(req.RespCh, netchan.Recv, respCh)
+	respCh := make(chan int, 5)
+	err = mn.Open("response chan 0", netchan.Recv, respCh)
 	if err != nil {
 		log.Fatal(err)
 	}
-	for i := 0; i < req.N; i++ {
-		select {
-		case num := <-respCh:
-			if num == 99 {
-				fmt.Println(num)
-			}
-		case <-mn.ErrorSignal():
-			log.Fatal(mn.Error())
-		}
+	for i := range respCh {
+		fmt.Printf("%d ", i)
 	}
 
 	mn.ShutDown()
@@ -53,38 +48,28 @@ func client(conn io.ReadWriteCloser) {
 // sumIntegers receives the integers from net-chan "integers" and returns their sum.
 func server(conn io.ReadWriteCloser) {
 	mn := netchan.Manage(conn)
+	go checkErrors(mn)
 
-	reqCh := make(chan request, 10)
+	reqCh := make(chan request, 5)
 	err := mn.Open("requests", netchan.Recv, reqCh)
 	if err != nil {
 		log.Fatal(err)
 	}
-	var req request
-	select {
-	case req = <-reqCh:
-	case <-mn.ErrorSignal():
-		log.Fatal(mn.Error())
-	}
+	req := <-reqCh
 
-	respCh := make(chan int)
-	err = mn.Open(req.RespCh, netchan.Send, respCh)
+	respCh := make(chan int, 1)
+	err = mn.Open(req.RespChName, netchan.Send, respCh)
 	if err != nil {
 		log.Fatal(err)
 	}
 	for i := 0; i < req.N; i++ {
-		select {
-		case respCh <- i:
-		case <-mn.ErrorSignal():
-			log.Fatal(mn.Error())
-		}
+		respCh <- i
 	}
 	close(respCh)
 
-	// wait that client receives everything and shuts down
-	<-mn.ErrorSignal()
-	if err := mn.Error(); err != io.EOF {
-		log.Fatal(err)
-	}
+	// wait that client receives everything
+	// and shuts down, we will get EOF
+	checkErrors(mn)
 }
 
 // This example shows a basic netchan session: two peers establish a connection and
@@ -96,5 +81,5 @@ func Example_requestResponse() {
 	sideA, sideB := newPipeConn() // a connection based on io.PipeReader/Writer
 	go client(sideA)
 	server(sideB)
-	// Output: 99
+	// Output: 0 1 2 3 4 5 6 7 8 9
 }
