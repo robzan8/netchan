@@ -135,7 +135,7 @@ func ManageLimit(conn io.ReadWriteCloser, msgSizeLimit int) *Manager {
 	const chCap int = 8
 	sendElemCh := make(chan element, chCap)
 	recvCredCh := make(chan credit, chCap)
-	sendTab := &sendTable{pending: make(map[hashedName]pendEntry)}
+	sendTab := new(sendTable)
 	*send = sender{toEncoder: sendElemCh, table: sendTab, mn: mn}
 	send.initialize()
 	credRecv := &credReceiver{creditCh: recvCredCh, table: sendTab, mn: mn}

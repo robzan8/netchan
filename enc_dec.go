@@ -11,7 +11,7 @@ import (
 type msgType int
 
 const (
-	helloMsg = iota
+	helloMsg = 1 + iota
 	elemMsg
 	initElemMsg
 	closeMsg

@@ -25,6 +25,7 @@ type sendEntry struct {
 }
 
 type pendEntry struct {
+	name hashedName
 	init bool
 	ch   reflect.Value
 }
@@ -32,7 +33,7 @@ type pendEntry struct {
 type sendTable struct {
 	sync.RWMutex
 	t       []sendEntry
-	pending map[hashedName]pendEntry
+	pending []pendEntry
 }
 
 type sender struct {
@@ -59,6 +60,16 @@ func entryByName(table *sendTable, name hashedName) *sendEntry {
 	return nil
 }
 
+func pendByName(table *sendTable, name hashedName) *pendEntry {
+	for i := range table.pending {
+		pend := &table.pending[i]
+		if pend.name == name {
+			return pend
+		}
+	}
+	return nil
+}
+
 // The ID of a newly opened net-chan is defin
 func (s *sender) open(name string, ch reflect.Value) error {
 	s.table.Lock()
@@ -74,8 +85,8 @@ func (s *sender) open(name string, ch reflect.Value) error {
 		entry.ch = ch
 		return nil
 	}
-	_, present := s.table.pending[hName]
-	if present {
+	pend := pendByName(s.table, hName)
+	if pend != nil {
 		return &errAlreadyOpen{name, Send}
 	}
 	s.table.pending[hName] = pendEntry{true, ch}
