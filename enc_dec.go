@@ -11,7 +11,8 @@ import (
 type msgType int
 
 const (
-	elemMsg = iota
+	helloMsg = iota
+	elemMsg
 	initElemMsg
 	closeMsg
 	creditMsg
@@ -67,6 +68,8 @@ func (e *encoder) encode(v interface{}) {
 }
 
 func (e *encoder) run() {
+	e.encode(header{helloMsg, 0})
+
 	for e.elemCh != nil || e.creditCh != nil {
 		select {
 		case elem, ok := <-e.elemCh:
@@ -161,6 +164,12 @@ func (d *decoder) run() (err error) {
 		close(d.toReceiver)
 		close(d.toCredRecv)
 	}()
+	var h header
+	err = d.decode(&h)
+	if err != nil {
+		return
+	}
+	// check and log that hello msg has been received
 	for {
 		if err = d.mn.Error(); err != nil {
 			return

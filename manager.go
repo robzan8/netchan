@@ -2,9 +2,10 @@ package netchan
 
 /* TODO:
 - more informative errors
-- maybe debug log?
+- DEBUG LOG
 - more tests
 - fuzzy testing
+- need more info (strings?) in protocol?
 
 performance:
 - profile time and memory
