@@ -3,28 +3,13 @@ package netchan
 import (
 	"errors"
 	"reflect"
-	"sync"
 	"sync/atomic"
 	"time"
 )
 
-type recvEntry struct {
-	name     hashedName
-	present  bool
-	init     bool
-	ch       reflect.Value
-	received int64
-	recvCap  int64
-}
-
-type recvTable struct {
-	sync.RWMutex
-	t []recvEntry
-}
-
 type receiver struct {
 	elemCh <-chan element
-	table  *recvTable
+	table  *chanTable
 	mn     *Manager
 }
 
@@ -33,37 +18,25 @@ func (r *receiver) open(name string, ch reflect.Value) error {
 	defer r.table.Unlock()
 
 	hName := hashName(name)
-	for _, entry := range r.table.t {
-		if entry.name == hName {
-			return &errAlreadyOpen{name, Recv}
-		}
+	entry := entryByName(r.table.t, hName)
+	if entry != nil {
+		return &errAlreadyOpen{name, Recv}
 	}
-	// get an id for the new channel
-	id := len(r.table.t)
-	for i := range r.table.t {
-		if !r.table.t[i].present {
-			id = i
-			break
-		}
-	}
-	newEntry := recvEntry{
-		name:     hName,
-		present:  true,
-		init:     true,
-		ch:       ch,
-		received: 0,
-		recvCap:  int64(ch.Cap()),
-	}
-	if id == len(r.table.t) {
-		r.table.t = append(r.table.t, newEntry)
-	} else {
-		r.table.t[id] = newEntry
-	}
+	// the position where the entry is added will
+	// actually determine the net-chan's id
+	r.table.t = addEntry(r.table.t, chanEntry{
+		name:    hName,
+		present: true,
+		init:    true,
+		ch:      ch,
+		recvCap: int64(ch.Cap()),
+	})
 	return nil
 }
 
 func (r *receiver) handleElem(elem element) error {
 	r.table.RLock()
+
 	if elem.id >= len(r.table.t) {
 		r.table.RUnlock()
 		return errInvalidId
@@ -78,17 +51,17 @@ func (r *receiver) handleElem(elem element) error {
 		// table array can be reallocated here
 		r.table.Lock()
 		r.table.t[elem.id].ch.Close()
-		r.table.t[elem.id] = recvEntry{}
+		r.table.t[elem.id] = chanEntry{}
 		r.table.Unlock()
 		return nil
 	}
-	if atomic.LoadInt64(&entry.received) >= entry.recvCap {
+	if atomic.LoadInt64(entry.received()) >= entry.recvCap {
 		r.table.RUnlock()
 		return errors.New("netchan Manager: peer sent more than its credit allowed")
 	}
 	// do not swap Send and AddInt64 operations
 	entry.ch.Send(elem.val) // does not block
-	atomic.AddInt64(&entry.received, 1)
+	atomic.AddInt64(entry.received(), 1)
 	r.table.RUnlock()
 	return nil
 }
@@ -109,7 +82,7 @@ func (r *receiver) run() {
 
 type credSender struct {
 	toEncoder chan<- credit
-	table     *recvTable
+	table     *chanTable
 	mn        *Manager
 
 	credits []credit
@@ -128,14 +101,15 @@ func (s *credSender) run() {
 
 func (s *credSender) updateCredits() {
 	s.table.RLock()
-	s.credits = s.credits[:0]
+
+	s.credits = s.credits[0:0]
 	for id := range s.table.t {
 		entry := &s.table.t[id]
 		if !entry.present {
 			continue
 		}
 		// do not swap the next two lines
-		received := atomic.LoadInt64(&entry.received)
+		received := atomic.LoadInt64(entry.received())
 		chLen := int64(entry.ch.Len())
 		consumed := received - chLen
 		if entry.init {
@@ -144,7 +118,7 @@ func (s *credSender) updateCredits() {
 		} else if consumed*2 >= entry.recvCap { // i.e. consumed >= ceil(recvCap/2)
 			s.credits = append(s.credits, credit{id, consumed, nil})
 			// forget about the messages the user consumed
-			atomic.AddInt64(&entry.received, -consumed)
+			atomic.AddInt64(entry.received(), -consumed)
 		}
 		// TODO: when much time passes, send credit even if it's small
 	}

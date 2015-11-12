@@ -31,13 +31,10 @@ type logFn func(...interface{}) error
 func (f logFn) Log(keyvals ...interface{}) error { return f(keyvals...) }
 
 // netchan's default logger. Prints to stderr in logfmt format.
-// TODO: document what it logs and how.
+// TODO: implement it and document what it logs and how.
 var defaultLog Logger = logFn(func(keyvals ...interface{}) error {
-	for k, v := 0, 1; v < len(keyvals); k, v = k+2, v+2 {
-		fmt.Printf("%v=%v ")
-	}
-	fmt.Println()
-	return nil
+	_, err := fmt.Println(keyvals...)
+	return err
 })
 
 var discardLog Logger = logFn(func(...interface{}) error { return nil })

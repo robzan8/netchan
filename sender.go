@@ -3,80 +3,30 @@ package netchan
 import (
 	"errors"
 	"reflect"
-	"sync"
 	"sync/atomic"
 	"time"
 )
 
-// When a net-chan is opened for receiving, a credit message is sent to the peer with the
-// id, name and the receiver's buffer capacity as credit increment value
-const (
-	maxHalfOpen = 256
-	maxHoles    = 256
-)
-
-type sendEntry struct {
-	name    hashedName
-	present bool
-	init    bool
-	ch      reflect.Value
-	credit  int64
-	recvCap int64
-}
-
-type pendEntry struct {
-	name hashedName
-	init bool
-	ch   reflect.Value
-}
-
-type sendTable struct {
-	sync.RWMutex
-	t       []sendEntry
-	pending []pendEntry
-}
-
 type sender struct {
 	toEncoder chan<- element
-	table     *sendTable
+	table     *chanTable
 	mn        *Manager
 
 	cases []reflect.SelectCase
 	ids   []int
 }
 
-func (s *sender) initialize() {
+func (s *sender) init() {
 	s.cases = []reflect.SelectCase{reflect.SelectCase{Dir: reflect.SelectDefault}}
 	s.ids = []int{-1}
 }
 
-func entryByName(table *sendTable, name hashedName) *sendEntry {
-	for i := range table.t {
-		entry := &table.t[i]
-		if entry.present && entry.name == name {
-			return entry
-		}
-	}
-	return nil
-}
-
-func pendByName(table *sendTable, name hashedName) *pendEntry {
-	for i := range table.pending {
-		pend := &table.pending[i]
-		if pend.name == name {
-			return pend
-		}
-	}
-	return nil
-}
-
-// The ID of a newly opened net-chan is defin
 func (s *sender) open(name string, ch reflect.Value) error {
 	s.table.Lock()
 	defer s.table.Unlock()
 
 	hName := hashName(name)
-	entry := entryByName(s.table, hName)
+	entry := entryByName(s.table.t, hName)
 	if entry != nil {
 		if entry.ch != (reflect.Value{}) {
 			return &errAlreadyOpen{name, Send}
@@ -85,41 +35,43 @@ func (s *sender) open(name string, ch reflect.Value) error {
 		entry.ch = ch
 		return nil
 	}
-	pend := pendByName(s.table, hName)
+	pend := entryByName(s.table.pending, hName)
 	if pend != nil {
 		return &errAlreadyOpen{name, Send}
 	}
-	s.table.pending[hName] = pendEntry{true, ch}
+	s.table.pending = addEntry(s.table.pending, chanEntry{
+		name:    hName,
+		present: true,
+		init:    true,
+		ch:      ch,
+	})
 	return nil
 }
 
 func (s *sender) handleElem(elem element) {
-	atomic.AddInt64(&s.table.t[elem.id].credit, -1)
-	s.table.RUnlock()
-	s.toEncoder <- elem
-	if !elem.ok {
-		// channel has been closed;
-		// an initial credit may arrive in this moment and add a new
-		// entry in the table, possibly triggering a whole reallocation of
-		// the underlying array, but our id will remain the same and
-		// our entry will be untouched.
+	if elem.ok {
+		atomic.AddInt64(s.table.t[elem.id].credit(), -1)
+		s.table.RUnlock()
+	} else {
+		s.table.RUnlock()
 		s.table.Lock()
-		s.table.t[elem.id] = sendEntry{}
+		s.table.t[elem.id] = chanEntry{}
 		s.table.Unlock()
 	}
+	s.toEncoder <- elem
 }
 
 func (s *sender) run() {
-	// TODO: check if there are pend/sendEntries with init = true
+	// TODO: check if there are entries (possibly pending) with init = true
 	// and send the initElemMsg.
 	// also check that init is set correctly everywhere in this file
 	for s.mn.Error() == nil {
 		s.table.RLock()
-		s.cases = s.cases[:1]
-		s.ids = s.ids[:1]
+		s.cases = s.cases[0:1]
+		s.ids = s.ids[0:1]
 		for id := range s.table.t {
 			entry := &s.table.t[id]
-			cred := atomic.LoadInt64(&entry.credit)
+			cred := atomic.LoadInt64(entry.credit())
 			if entry.present && cred > 0 {
 				s.cases = append(s.cases,
 					reflect.SelectCase{Dir: reflect.SelectRecv, Chan: entry.ch})
@@ -141,7 +93,7 @@ func (s *sender) run() {
 
 type credReceiver struct {
 	creditCh <-chan credit
-	table    *sendTable
+	table    *chanTable
 	mn       *Manager
 }
 
@@ -166,6 +118,7 @@ func (r *credReceiver) run() {
 
 func (r *credReceiver) handleCred(cred credit) error {
 	r.table.RLock()
+
 	if cred.id >= len(r.table.t) {
 		r.table.RUnlock()
 		return errInvalidId
@@ -177,54 +130,62 @@ func (r *credReceiver) handleCred(cred credit) error {
 		r.table.RUnlock()
 		return nil
 	}
-	newCred := atomic.AddInt64(&entry.credit, cred.incr)
+	newCred := atomic.AddInt64(entry.credit(), cred.incr)
 	if newCred > entry.recvCap {
 		r.table.RUnlock()
-		return errors.New("wrong credit!")
+		return errors.New("too much credit!")
 	}
 	r.table.RUnlock()
 	return nil
+}
+
+const (
+	maxHoles    = 256
+	maxHalfOpen = 256
+)
+
+func sanityCheck(table []chanEntry) (bool, bool) {
+	var holes, halfOpen int
+	for i := range table {
+		if !table[i].present {
+			holes++
+		} else if table[i].ch == (reflect.Value{}) {
+			halfOpen++
+		}
+	}
+	return holes > maxHoles, halfOpen > maxHalfOpen
 }
 
 func (r *credReceiver) handleInitCred(cred credit) error {
 	r.table.Lock()
 	defer r.table.Unlock()
 
-	// explain checks
-	halfOpen := 0
-	holes := 0
-	for i := range r.table.t {
-		entry := &r.table.t[i]
-		if entry.name == *cred.name {
-			return errors.New("netchan Manager: initial credit for already open net-chan")
-		}
-		if !entry.present {
-			holes++
-		} else if entry.ch == (reflect.Value{}) {
-			halfOpen++
-		}
+	entry := entryByName(r.table.t, *cred.name)
+	if entry != nil {
+		return errors.New("netchan Manager: initial credit for already open net-chan")
 	}
-	if halfOpen > maxHalfOpen {
+	manyHoles, manyHalfOpen := sanityCheck(r.table.t)
+	if manyHalfOpen {
 		return errors.New("netchan Manager: too many half open net-chans")
 	}
-	if holes > maxHoles {
-		return errors.New("netchan Manager: peer does not recycle old net-chan IDs")
-	}
 
-	newEntry := sendEntry{
+	newEntry := chanEntry{
 		name:    *cred.name,
 		present: true,
-		credit:  cred.incr,
+		numElem: cred.incr, // credit
 		recvCap: cred.incr,
 	}
-	pend, present := r.table.pending[*cred.name]
-	if present {
+	pend := entryByName(r.table.pending, *cred.name)
+	if pend != nil {
 		newEntry.init = pend.init
 		newEntry.ch = pend.ch
-		delete(r.table.pending, *cred.name)
+		pend.present = false
 	}
 	if cred.id == len(r.table.t) {
 		// cred.id is a fresh slot
+		if manyHoles {
+			return errors.New("netchan Manager: peer does not recycle old net-chan IDs")
+		}
 		r.table.t = append(r.table.t, newEntry)
 		return nil
 	}

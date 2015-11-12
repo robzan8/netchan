@@ -141,7 +141,7 @@ func (l *limitedReader) Read(p []byte) (n int, err error) {
 type decoder struct {
 	toReceiver   chan<- element
 	toCredRecv   chan<- credit
-	table        *recvTable
+	table        *chanTable
 	mn           *Manager
 	msgSizeLimit int
 	limReader    limitedReader

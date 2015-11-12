@@ -6,6 +6,7 @@ package netchan
 - more tests
 - fuzzy testing
 - need more info (strings?) in protocol?
+- uints in protocol?
 
 performance:
 - profile time and memory
@@ -15,7 +16,6 @@ performance:
 */
 
 import (
-	"crypto/sha1"
 	"encoding/gob"
 	"errors"
 	"fmt"
@@ -24,26 +24,6 @@ import (
 	"sync/atomic"
 	"time"
 )
-
-// sha1-hashed name of a net-chan
-type hashedName [20]byte
-
-func hashName(name string) hashedName {
-	return sha1.Sum([]byte(name))
-}
-
-type element struct {
-	id   int
-	val  reflect.Value
-	ok   bool // if not ok, the channel has been closed
-	name *hashedName
-}
-
-type credit struct {
-	id   int
-	incr int64
-	name *hashedName
-}
 
 // once is an implementation of sync.Once that uses a channel.
 type once struct {
@@ -135,14 +115,14 @@ func ManageLimit(conn io.ReadWriteCloser, msgSizeLimit int) *Manager {
 	const chCap int = 8
 	sendElemCh := make(chan element, chCap)
 	recvCredCh := make(chan credit, chCap)
-	sendTab := new(sendTable)
+	sendTab := new(chanTable)
 	*send = sender{toEncoder: sendElemCh, table: sendTab, mn: mn}
-	send.initialize()
+	send.init()
 	credRecv := &credReceiver{creditCh: recvCredCh, table: sendTab, mn: mn}
 
 	recvElemCh := make(chan element, chCap)
 	sendCredCh := make(chan credit, chCap)
-	recvTab := new(recvTable)
+	recvTab := new(chanTable)
 	*recv = receiver{elemCh: recvElemCh, table: recvTab, mn: mn}
 	credSend := &credSender{toEncoder: sendCredCh, table: recvTab, mn: mn}
 
