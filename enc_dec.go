@@ -12,9 +12,10 @@ type msgType int
 
 const (
 	elemMsg = iota
+	initElemMsg
 	closeMsg
 	creditMsg
-	openMsg
+	initCredMsg
 	errorMsg
 	netErrorMsg
 )
@@ -72,6 +73,9 @@ func (e *encoder) run() {
 			switch {
 			case !ok:
 				e.elemCh = nil
+			case elem.name != nil:
+				e.encode(header{initElemMsg, 0})
+				e.encode(elem.name)
 			case !elem.ok:
 				e.encode(header{closeMsg, elem.id})
 			default:
@@ -84,7 +88,7 @@ func (e *encoder) run() {
 			case !ok:
 				e.creditCh = nil
 			case cred.name != nil:
-				e.encode(header{openMsg, cred.id})
+				e.encode(header{initCredMsg, cred.id})
 				e.encode(cred.incr)
 				e.encode(cred.name)
 			default:
@@ -96,10 +100,10 @@ func (e *encoder) run() {
 	err := e.mn.Error()
 	netErr, ok := err.(net.Error)
 	if ok {
-		e.encode(header{MsgType: netErrorMsg})
+		e.encode(header{netErrorMsg, 0})
 		e.encode(netError{netErr.Error(), netErr.Timeout(), netErr.Temporary()})
 	} else {
-		e.encode(header{MsgType: errorMsg})
+		e.encode(header{errorMsg, 0})
 		e.encode(err.Error())
 	}
 	// error message in flight can be discarded?
@@ -186,10 +190,18 @@ func (d *decoder) run() (err error) {
 			}
 			d.toReceiver <- elem
 
+		case initElemMsg:
+			var name hashedName
+			err = d.decode(&name)
+			if err != nil {
+				return
+			}
+			panic("log name here?")
+
 		case closeMsg:
 			d.toReceiver <- element{id: h.ChanId, ok: false}
 
-		case creditMsg, openMsg:
+		case creditMsg, initCredMsg:
 			cred := credit{id: h.ChanId}
 			err = d.decode(&cred.incr)
 			if err != nil {
@@ -198,7 +210,7 @@ func (d *decoder) run() (err error) {
 			if cred.incr <= 0 {
 				return errInvalidCred
 			}
-			if h.MsgType == openMsg {
+			if h.MsgType == initCredMsg {
 				cred.name = new(hashedName)
 				err = d.decode(cred.name)
 				if err != nil {

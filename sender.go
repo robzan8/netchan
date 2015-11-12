@@ -18,15 +18,21 @@ const (
 type sendEntry struct {
 	name    hashedName
 	present bool
+	init    bool
 	ch      reflect.Value
 	credit  int64
 	recvCap int64
 }
 
+type pendEntry struct {
+	init bool
+	ch   reflect.Value
+}
+
 type sendTable struct {
 	sync.RWMutex
 	t       []sendEntry
-	pending map[hashedName]reflect.Value
+	pending map[hashedName]pendEntry
 }
 
 type sender struct {
@@ -43,24 +49,28 @@ func (s *sender) initialize() {
 	s.ids = []int{-1}
 }
 
+func entryByName(table *sendTable, name hashedName) *sendEntry {
+	for i := range table.t {
+		entry := &table.t[i]
+		if entry.present && entry.name == name {
+			return entry
+		}
+	}
+	return nil
+}
+
 // The ID of a newly opened net-chan is defin
 func (s *sender) open(name string, ch reflect.Value) error {
 	s.table.Lock()
 	defer s.table.Unlock()
 
 	hName := hashName(name)
-	var entry *sendEntry
-	for i := range s.table.t {
-		e := &s.table.t[i]
-		if e.present && e.name == hName {
-			entry = e
-			break
-		}
-	}
+	entry := entryByName(s.table, hName)
 	if entry != nil {
 		if entry.ch != (reflect.Value{}) {
 			return &errAlreadyOpen{name, Send}
 		}
+		entry.init = true
 		entry.ch = ch
 		return nil
 	}
@@ -68,7 +78,7 @@ func (s *sender) open(name string, ch reflect.Value) error {
 	if present {
 		return &errAlreadyOpen{name, Send}
 	}
-	s.table.pending[hName] = ch
+	s.table.pending[hName] = pendEntry{true, ch}
 	return nil
 }
 
@@ -89,6 +99,9 @@ func (s *sender) handleElem(elem element) {
 }
 
 func (s *sender) run() {
+	// TODO: check if there are pend/sendEntries with init = true
+	// and send the initElemMsg.
+	// also check that init is set correctly everywhere in this file
 	for s.mn.Error() == nil {
 		s.table.RLock()
 		s.cases = s.cases[:1]
@@ -105,7 +118,7 @@ func (s *sender) run() {
 		i, val, ok := reflect.Select(s.cases)
 		switch {
 		case i > 0:
-			s.handleElem(element{s.ids[i], val, ok})
+			s.handleElem(element{s.ids[i], val, ok, nil})
 			// handleElem does table.RUnlock()
 		default:
 			s.table.RUnlock()
@@ -190,11 +203,15 @@ func (r *credReceiver) handleInitCred(cred credit) error {
 	newEntry := sendEntry{
 		name:    *cred.name,
 		present: true,
-		ch:      r.table.pending[*cred.name], // may not be present
 		credit:  cred.incr,
 		recvCap: cred.incr,
 	}
-	delete(r.table.pending, *cred.name)
+	pend, present := r.table.pending[*cred.name]
+	if present {
+		newEntry.init = pend.init
+		newEntry.ch = pend.ch
+		delete(r.table.pending, *cred.name)
+	}
 	if cred.id == len(r.table.t) {
 		// cred.id is a fresh slot
 		r.table.t = append(r.table.t, newEntry)

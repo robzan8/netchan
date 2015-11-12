@@ -32,9 +32,10 @@ func hashName(name string) hashedName {
 }
 
 type element struct {
-	id  int
-	val reflect.Value
-	ok  bool // if not ok, the channel has been closed
+	id   int
+	val  reflect.Value
+	ok   bool // if not ok, the channel has been closed
+	name *hashedName
 }
 
 type credit struct {
@@ -133,7 +134,7 @@ func ManageLimit(conn io.ReadWriteCloser, msgSizeLimit int) *Manager {
 	const chCap int = 8
 	sendElemCh := make(chan element, chCap)
 	recvCredCh := make(chan credit, chCap)
-	sendTab := &sendTable{pending: make(map[hashedName]reflect.Value)}
+	sendTab := &sendTable{pending: make(map[hashedName]pendEntry)}
 	*send = sender{toEncoder: sendElemCh, table: sendTab, mn: mn}
 	send.initialize()
 	credRecv := &credReceiver{creditCh: recvCredCh, table: sendTab, mn: mn}
