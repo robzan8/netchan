@@ -1,40 +1,72 @@
 package netchan
 
 import (
+	"bufio"
 	"fmt"
-	"sync/atomic"
+	"os"
+	"strconv"
+	"strings"
+	"sync"
 )
 
 type Logger interface {
 	Log(keyvals ...interface{}) error
 }
 
-var logger atomic.Value // *Logger
+var log Logger = newDefaultLogger()
 
-func init() {
-	logger.Store(&defaultLog)
-}
-
-func GetLogger() Logger {
-	return *logger.Load().(*Logger)
-}
-
-func SetLogger(l Logger) {
-	if l == nil {
-		logger.Store(&discardLog)
+func SetLogger(logger Logger) {
+	if logger == nil {
+		log = discardLog
+		return
 	}
-	logger.Store(&l)
+	log = logger
 }
 
-type logFn func(...interface{}) error
+type defaultLogger struct {
+	sync.Mutex
+	*bufio.Writer
+}
 
-func (f logFn) Log(keyvals ...interface{}) error { return f(keyvals...) }
+func newDefaultLogger() *defaultLogger {
+	l := new(defaultLogger)
+	l.Writer = bufio.NewWriter(os.Stderr)
+	return l
+}
 
 // netchan's default logger. Prints to stderr in logfmt format.
-// TODO: implement it and document what it logs and how.
-var defaultLog Logger = logFn(func(keyvals ...interface{}) error {
-	_, err := fmt.Println(keyvals...)
-	return err
-})
+// TODO: document what it logs and how.
+func (l *defaultLogger) Log(keyvals ...interface{}) error {
+	l.Lock()
+	defer l.Unlock()
 
-var discardLog Logger = logFn(func(...interface{}) error { return nil })
+	if len(keyvals)%2 == 1 {
+		keyvals = append(keyvals, "[no_val]")
+	}
+	for k := 0; k < len(keyvals); k += 2 {
+		val := keyvals[k+1]
+		err, ok := val.(error)
+		if ok {
+			val = err.Error()
+		}
+		str, ok := val.(string)
+		if ok && strings.ContainsAny(str, " \"\n\t\b\f\r\v") {
+			val = strconv.Quote(str)
+		}
+		var sep byte
+		if k == len(keyvals)-2 {
+			sep = '\n'
+		} else {
+			sep = ' '
+		}
+		fmt.Fprintf(l, "%s=%v%c", keyvals[k], val, sep)
+	}
+	l.Flush()
+	return nil
+}
+
+type discardLogger struct{}
+
+func (l discardLogger) Log(...interface{}) error { return nil }
+
+var discardLog = discardLogger{}

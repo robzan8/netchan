@@ -56,6 +56,7 @@ func (o *once) Do(f func()) {
 // A Manager handles the message traffic of its connection,
 // implementing the netchan protocol.
 type Manager struct {
+	name string
 	conn io.ReadWriteCloser
 	send *sender
 	recv *receiver
