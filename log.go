@@ -1,72 +1,85 @@
 package netchan
 
 import (
-	"bufio"
+	"bytes"
 	"fmt"
-	"os"
-	"strconv"
+	"log"
+	"runtime"
 	"strings"
 	"sync"
 )
 
 type Logger interface {
-	Log(keyvals ...interface{}) error
+	Log(keyvals ...interface{})
 }
 
-var log Logger = newDefaultLogger()
+type defaultLogger struct{}
 
-func SetLogger(logger Logger) {
-	if logger == nil {
-		log = discardLog
-		return
-	}
-	log = logger
-}
+var logBufs = sync.Pool{New: func() interface{} { return new(bytes.Buffer) }}
 
-type defaultLogger struct {
-	sync.Mutex
-	*bufio.Writer
-}
-
-func newDefaultLogger() *defaultLogger {
-	l := new(defaultLogger)
-	l.Writer = bufio.NewWriter(os.Stderr)
-	return l
-}
-
-// netchan's default logger. Prints to stderr in logfmt format.
+// netchan's default logger. Prints to log.Output in logfmt format.
 // TODO: document what it logs and how.
-func (l *defaultLogger) Log(keyvals ...interface{}) error {
-	l.Lock()
-	defer l.Unlock()
+func (*defaultLogger) Log(keyvals ...interface{}) {
+	buf := logBufs.Get().(*bytes.Buffer)
 
-	if len(keyvals)%2 == 1 {
-		keyvals = append(keyvals, "[no_val]")
-	}
+	err := false
 	for k := 0; k < len(keyvals); k += 2 {
-		val := keyvals[k+1]
-		err, ok := val.(error)
-		if ok {
-			val = err.Error()
-		}
-		str, ok := val.(string)
-		if ok && strings.ContainsAny(str, " \"\n\t\b\f\r\v") {
-			val = strconv.Quote(str)
+		var key, val interface{}
+		key = keyvals[k]
+		if k == len(keyvals)-1 {
+			val = "[no_val]"
+		} else {
+			val = keyvals[k+1]
 		}
 		var sep byte
-		if k == len(keyvals)-2 {
+		if k >= len(keyvals)-2 {
 			sep = '\n'
 		} else {
 			sep = ' '
 		}
-		fmt.Fprintf(l, "%s=%v%c", keyvals[k], val, sep)
+		if str := key.(string); str == "err" {
+			err = true
+		}
+		format := "%s=%v%c" // key=value, separator
+		str, ok := val.(string)
+		if ok && strings.ContainsAny(str, " =\"\n\t") {
+			format = "%s=%q%c" // quote value
+		}
+		fmt.Fprintf(buf, format, keyvals[k], val, sep)
 	}
-	l.Flush()
-	return nil
+	if err {
+		trace := make([]byte, 4096)
+		n := runtime.Stack(trace, false)
+		buf.WriteString("[netchan_begin_stack_trace]\n")
+		buf.Write(trace[0:n])
+		if n == 4096 {
+			buf.WriteString("\n[netchan_stack_trace_truncated]\n")
+		}
+		buf.WriteString("[netchan_end_stack_trace]\n")
+	}
+	// calldepth of 3: source of log event -> Manager.log() -> defaultLogger.Log()
+	log.Output(3, buf.String())
+	// if logger performance sucks, consider going to Stdout through a buffered writer
+
+	// don't hold on to large buffers
+	if buf.Cap() > 1024 {
+		return
+	}
+	buf.Reset()
+	logBufs.Put(buf)
 }
 
 type discardLogger struct{}
 
-func (l discardLogger) Log(...interface{}) error { return nil }
+func (*discardLogger) Log(...interface{}) {}
 
-var discardLog = discardLogger{}
+// netchan will log here
+var logger Logger = (*defaultLogger)(nil)
+
+func SetLogger(l Logger) {
+	if l == nil {
+		logger = (*discardLogger)(nil)
+		return
+	}
+	logger = l
+}

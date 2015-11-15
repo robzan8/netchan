@@ -7,6 +7,10 @@ import (
 	"time"
 )
 
+func init() {
+	SetLogger(nil)
+}
+
 // pipeConn represents one side of a full-duplex
 // connection based on io.PipeReader/Writer
 type pipeConn struct {

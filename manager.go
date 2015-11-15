@@ -1,22 +1,25 @@
 package netchan
 
 /* TODO:
-- more informative errors
-- DEBUG LOG
+- more informative errors (with logging)
 - more tests
 - fuzzy testing
-- need more info (strings?) in protocol?
 - uints in protocol?
 
 performance:
 - profile time and memory
+- do not call reflect.New each time an element arrives from the net
 - more sophisticated sender's select
 - more sophisticated credit sender
 - adjust ShutDown timeout
+- performance of logger (buffer log's writes)
 */
 
 import (
+	"crypto/rand"
+	"encoding/binary"
 	"encoding/gob"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -101,6 +104,16 @@ func Manage(conn io.ReadWriteCloser) *Manager {
 	return ManageLimit(conn, 0)
 }
 
+func newName() string {
+	var r, x [8]byte
+	_, err := rand.Read(r[0:4])
+	if err != nil {
+		binary.LittleEndian.PutUint64(r[:], uint64(time.Now().UnixNano()))
+	}
+	hex.Encode(x[:], r[0:4])
+	return string(x[0:7])
+}
+
 func ManageLimit(conn io.ReadWriteCloser, msgSizeLimit int) *Manager {
 	if msgSizeLimit <= 0 {
 		// use default
@@ -109,9 +122,18 @@ func ManageLimit(conn io.ReadWriteCloser, msgSizeLimit int) *Manager {
 
 	send := new(sender)
 	recv := new(receiver)
-	mn := &Manager{conn: conn, send: send, recv: recv}
+	mn := &Manager{name: newName(), conn: conn, send: send, recv: recv}
 	mn.errOnce.done = make(chan struct{})
 	mn.closeOnce.done = make(chan struct{})
+
+	logger.Log(
+		"package", "netchan",
+		"level", "info",
+		"desc", "a new manager is created",
+		"manager", mn.name,
+		"event", "manage",
+		"err", errors.New("foo bar"),
+	)
 
 	const chCap int = 8
 	sendElemCh := make(chan element, chCap)

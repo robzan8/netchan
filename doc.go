@@ -1,14 +1,14 @@
 /*
-Package netchan enables using Go channels to communicate over a network.
-One peer sends messages to a channel and the other peer receives the messages from
-another channel of the same type: netchan takes care of transferring the messages between
-the two channels over a connection.
+Package netchan enables using Go channels to communicate over a network: one peer sends
+messages to a channel and netchan forwards them over a connection to the other peer,
+where they are received from another channel of the same type.
 
 Basics
 
-Net-chans are unidirectional: items of a net-chan are sent from one side of the
-connection and received on the other side; but it is possible to open multiple net-chans,
-in both directions, on a single connection.
+Net-chans are unidirectional: on one side of the connection a net-chan is opened for
+sending, on the other side the same net-chan (identified by name) is opened for
+receiving; but it is possible to open multiple net-chans, in both directions, on a single
+connection.
 
 The connection can be any io.ReadWriteCloser like a TCP connection or unix domain
 sockets. The user is in charge of establishing the connection, which is then handed over
@@ -28,7 +28,7 @@ On the send side:
 
 On the receive side:
 	mn := netchan.Manage(conn)
-	ch := make(chan int, 20)
+	ch := make(chan int, 20) // receive channel must be buffered
 	err := mn.Open("integers", netchan.Recv, ch)
 	for i := range ch {
 		fmt.Println(i)
@@ -37,7 +37,8 @@ On the receive side:
 All methods that Manager provides are thread-safe.
 
 Netchan uses gob to serialize messages (https://golang.org/pkg/encoding/gob/). Any data
-to be transmitted using netchan must obey gob's laws.
+to be transmitted using netchan must obey gob's laws. In particular, channels cannot be
+sent, but it is possible to send channel names.
 
 Error handling
 
