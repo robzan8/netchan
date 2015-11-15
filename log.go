@@ -50,15 +50,15 @@ func (*defaultLogger) Log(keyvals ...interface{}) {
 	if err {
 		trace := make([]byte, 4096)
 		n := runtime.Stack(trace, false)
-		buf.WriteString("[netchan_begin_stack_trace]\n")
+		buf.WriteString("[begin_stack_trace]\n")
 		buf.Write(trace[0:n])
 		if n == 4096 {
-			buf.WriteString("\n[netchan_stack_trace_truncated]\n")
+			buf.WriteString("\n[stack_trace_truncated]\n")
 		}
-		buf.WriteString("[netchan_end_stack_trace]\n")
+		buf.WriteString("[end_stack_trace]\n")
 	}
 	// calldepth of 3: source of log event -> Manager.log() -> defaultLogger.Log()
-	log.Output(3, buf.String())
+	log.Printf("%s\n", buf.Bytes())
 	// if logger performance sucks, consider going to Stdout through a buffered writer
 
 	// don't hold on to large buffers

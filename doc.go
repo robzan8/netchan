@@ -28,7 +28,7 @@ On the send side:
 
 On the receive side:
 	mn := netchan.Manage(conn)
-	ch := make(chan int, 20) // receive channel must be buffered
+	ch := make(chan int, 20) // channel used for receiving must be buffered
 	err := mn.Open("integers", netchan.Recv, ch)
 	for i := range ch {
 		fmt.Println(i)
