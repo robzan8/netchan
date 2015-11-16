@@ -61,10 +61,13 @@ func (r *receiver) handleElem(elem element) error {
 	}
 	if int64(entry.ch.Len()) == entry.recvCap {
 		r.table.RUnlock()
-		return errors.New("using one channel to receive from more than one net-chan?")
+		return errors.New(
+			"netchan: peer did not exceed its credit and yet the receive buffer is " +
+				"full. Are you using one channel to receive from multiple net-chans?",
+		)
 	}
 	// do not swap Send and AddInt64 operations
-	entry.ch.Send(elem.val) // does not block
+	entry.ch.Send(elem.val) // does not block (when the library not misused)
 	atomic.AddInt64(entry.received(), 1)
 	r.table.RUnlock()
 	return nil

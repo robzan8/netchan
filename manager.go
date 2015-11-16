@@ -126,15 +126,6 @@ func ManageLimit(conn io.ReadWriteCloser, msgSizeLimit int) *Manager {
 	mn.errOnce.done = make(chan struct{})
 	mn.closeOnce.done = make(chan struct{})
 
-	logger.Log(
-		"package", "netchan",
-		"level", "info",
-		"desc", "a new manager is created",
-		"manager", mn.name,
-		"event", "manage",
-		"err", errors.New("foo bar"),
-	)
-
 	const chCap int = 8
 	sendElemCh := make(chan element, chCap)
 	recvCredCh := make(chan credit, chCap)
