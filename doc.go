@@ -7,7 +7,7 @@ Basics
 
 Net-chans are unidirectional: on one side of the connection a net-chan is opened for
 sending, on the other side the same net-chan (identified by name) is opened for
-receiving; but it is possible to open multiple net-chans, in both directions, on a single
+receiving. But it is possible to open multiple net-chans, in both directions, on a single
 connection.
 
 The connection can be any io.ReadWriteCloser like a TCP connection or unix domain
@@ -38,7 +38,7 @@ All methods that Manager provides are thread-safe.
 
 Netchan uses gob to serialize messages (https://golang.org/pkg/encoding/gob/). Any data
 to be transmitted using netchan must obey gob's laws. In particular, channels cannot be
-sent, but it is possible to send channel names.
+sent, but it is possible to send net-chans' names.
 
 Error handling
 
@@ -55,6 +55,10 @@ occurred. Their intended use:
 	case <-mn.ErrorSignal():
 		log.Fatal(mn.Error())
 	}
+
+Some errors are not caught by netchan. For example, if one peer opens a net-chan with the
+wrong direction, both peers might end up waiting to receive messages, but none of them
+will send anything. It is advised to use timeouts to identify this kind of errors.
 
 Flow control
 
@@ -79,29 +83,8 @@ netchan-based API, no malicious client should be able to:
 	- force the server to allocate a lot of memory
 	- force the server to consume a big amount of CPU time
 
+Additional documentation
 
-
-Netchan protocol
-
-The netchan protocol is designed to be simple and precise. Every deviation from the protocol causes an
-error and every error is fatal. It involves no retransmissions nor timing issues, the
-underlying connection must take of delivering data in order and with best-effort
-reliability.
-Netchan uses gob for encoding and decoding data. Each netchan message is preceded by an header defined as:
-
-	type header struct {
-		MsgType int // type of the message immediately following
-		ChanId  int // ID of the net-chan this message is directed to
-	}
-
-There are 3 different types of messages: element messages (type 1), credit messages (type 2) and error messages (type 3).
-Receiving a message with an unknown type must raise an error. The netchan protocol is not extensible.
-
-Element messages carry values from and to user channels. They must be encoded as:
-
-	// enc is a gob encoder
-	enc.Encode(header{1, chanId})
-	enc.EncodeValue(value) // user data
-	enc.Encode(elem.ok)
+The page "Using netchan" collects various information to (https://github.com/robzan8/netchan/using_netchan.md)
 */
 package netchan

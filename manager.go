@@ -1,7 +1,7 @@
 package netchan
 
 /* TODO:
-- more informative errors (with logging)
+- more informative errors
 - more tests
 - fuzzy testing
 - uints in protocol?
@@ -16,10 +16,7 @@ performance:
 */
 
 import (
-	"crypto/rand"
-	"encoding/binary"
 	"encoding/gob"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -54,12 +51,13 @@ func (o *once) Do(f func()) {
 	f()
 	atomic.StoreInt32(&o.state, onceDone)
 	close(o.done)
+	// Relative order of the last two statements is important
+	// for correctly retrieving Error() after <-ErrorSignal().
 }
 
-// A Manager handles the message traffic of its connection,
-// implementing the netchan protocol.
+// A Manager handles the message traffic of its connection, implementing the netchan
+// protocol.
 type Manager struct {
-	name string
 	conn io.ReadWriteCloser
 	send *sender
 	recv *receiver
@@ -95,25 +93,21 @@ type Manager struct {
  <---- +----------+                                                   +----------+ <----
 */
 
-// Manage function starts a new Manager for the specified connection and returns it.
-// The connection can be any io.ReadWriteCloser that acts like a full duplex connection and
-// ensures reliable and in-order delivery of data, like: TCP, TLS, unix domain sockets,
-// websockets, in-memory io.PipeReader/Writer.
-// On each end, a connection must have only one manager.
+// Manage function starts a new Manager for the specified connection and returns it. The
+// connection can be any full-duplex io.ReadWriteCloser that provides in-order delivery
+// of data with best-effort reliability. On each end, a connection must have only one
+// manager.
+//
+// There is a default limit imposed on the size of incoming gob messages. To change it,
+// use ManageLimit.
 func Manage(conn io.ReadWriteCloser) *Manager {
 	return ManageLimit(conn, 0)
 }
 
-func newName() string {
-	var r, x [8]byte
-	_, err := rand.Read(r[0:4])
-	if err != nil {
-		binary.LittleEndian.PutUint64(r[:], uint64(time.Now().UnixNano()))
-	}
-	hex.Encode(x[:], r[0:4])
-	return string(x[0:7])
-}
-
+// ManageLimit is like Manage, but also allows to specify the maximum size of the gob
+// messages that will be accepted from the connection. If msgSizeLimit is 0 or negative,
+// the default will be used. When a too big message is received, an error is signaled on
+// this manager and the manager shuts down.
 func ManageLimit(conn io.ReadWriteCloser, msgSizeLimit int) *Manager {
 	if msgSizeLimit <= 0 {
 		// use default
@@ -122,7 +116,7 @@ func ManageLimit(conn io.ReadWriteCloser, msgSizeLimit int) *Manager {
 
 	send := new(sender)
 	recv := new(receiver)
-	mn := &Manager{name: newName(), conn: conn, send: send, recv: recv}
+	mn := &Manager{conn: conn, send: send, recv: recv}
 	mn.errOnce.done = make(chan struct{})
 	mn.closeOnce.done = make(chan struct{})
 
@@ -161,7 +155,7 @@ func ManageLimit(conn io.ReadWriteCloser, msgSizeLimit int) *Manager {
 	return mn
 }
 
-// The direction of a net-chan from the client's perspective.
+// The direction of a net-chan from the perspective of the local side of the connection.
 type Dir int
 
 const (
@@ -226,14 +220,8 @@ func (m *Manager) Open(name string, dir Dir, channel interface{}) error {
 }
 
 // Error returns the first error that occurred on this manager. If no error
-// occurred, it returns nil.
-//
-// When an error occurs, the manager tries to communicate it to the peer, closes all the
-// user channels registered for receiving and then shuts down. Some goroutine might be
-// blocked reading or writing to the connection and could "leak", if the connection is
-// not closed.
-//
-// See the basic package example for error handling.
+// occurred, it returns nil. When an error occurs, the manager tries to communicate it to
+// the peer and then shuts down.
 func (m *Manager) Error() error {
 	if atomic.LoadInt32(&m.errOnce.state) == onceDone {
 		return m.err
@@ -243,8 +231,6 @@ func (m *Manager) Error() error {
 
 // ErrorSignal returns a channel that never receives any message and is closed when an
 // error occurs on this manager.
-//
-// See the basic package example for error handling.
 func (m *Manager) ErrorSignal() <-chan struct{} {
 	// make this scale with multiple channels?
 	return m.errOnce.done
@@ -256,10 +242,19 @@ func (m *Manager) closeConn() {
 	})
 }
 
+// ShutDown tries to send a termination message to the peer and then shuts down the
+// manager and closes the connection. The ErrorSignal channel is closed and Error will
+// return io.EOF. The remote peer will also shut down and get EOF, if the termination
+// message is received correctly.
+//
+// The return value is the result of calling Close on the connection. The connection is
+// guaranteed to be closed once and only once, even if ShutDown is called multiple times,
+// possibly by multiple goroutines.
 func (m *Manager) ShutDown() error {
 	return m.ShutDownWith(io.EOF)
 }
 
+// ShutDownWith is like ShutDown, but err is signaled instead of EOF.
 func (m *Manager) ShutDownWith(err error) error {
 	if err == nil {
 		err = io.EOF

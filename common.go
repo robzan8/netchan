@@ -13,19 +13,22 @@ func hashName(name string) hashedName {
 	return sha1.Sum([]byte(name))
 }
 
+// An element carries a user value.
 type element struct {
-	id   int
-	val  reflect.Value
-	ok   bool // if not ok, the channel has been closed
+	id   int           // id of the net-chan
+	val  reflect.Value // user data
+	ok   bool          // if !ok, the net-chan has been closed
 	name *hashedName
 }
 
+// credit represents a credit message.
 type credit struct {
-	id   int
-	incr int64
+	id   int   // id of the net-chan
+	incr int64 // amount of credit
 	name *hashedName
 }
 
+// a channel entry in the sender's or receiver's table.
 type chanEntry struct {
 	name    hashedName
 	present bool

@@ -7,12 +7,15 @@ import (
 	"time"
 )
 
+// receiver receives elements from the decoder and sends them to the user channels.
 type receiver struct {
 	elemCh <-chan element
 	table  *chanTable
 	mn     *Manager
 }
 
+// Open a new net-chan for receiving. We set the init field of the new entry to true, so
+// that the credit sender knows it has to send the initial credit.
 func (r *receiver) open(name string, ch reflect.Value) error {
 	r.table.Lock()
 	defer r.table.Unlock()
@@ -34,6 +37,7 @@ func (r *receiver) open(name string, ch reflect.Value) error {
 	return nil
 }
 
+// got an element from the decoder
 func (r *receiver) handleElem(elem element) error {
 	r.table.RLock()
 
@@ -46,9 +50,9 @@ func (r *receiver) handleElem(elem element) error {
 		r.table.RUnlock()
 		return errInvalidId
 	}
-	if !elem.ok { // netchan closed normally
+	if !elem.ok { // netchan closed
 		r.table.RUnlock()
-		// table array can be reallocated here
+		// entry pointer can become invalid here
 		r.table.Lock()
 		r.table.t[elem.id].ch.Close()
 		r.table.t[elem.id] = chanEntry{}
@@ -66,7 +70,7 @@ func (r *receiver) handleElem(elem element) error {
 				"full. Are you using one channel to receive from multiple net-chans?",
 		)
 	}
-	// do not swap Send and AddInt64 operations
+	// do not swap the next two lines
 	entry.ch.Send(elem.val) // does not block (when the library not misused)
 	atomic.AddInt64(entry.received(), 1)
 	r.table.RUnlock()
@@ -87,9 +91,10 @@ func (r *receiver) run() {
 	}
 }
 
+// credSender monitors the receive channels and sends credits to the encoder.
 type credSender struct {
 	toEncoder chan<- credit
-	table     *chanTable
+	table     *chanTable // same table of the receiver
 	mn        *Manager
 
 	credits []credit
