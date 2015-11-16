@@ -59,6 +59,10 @@ func (r *receiver) handleElem(elem element) error {
 		r.table.RUnlock()
 		return errors.New("netchan Manager: peer sent more than its credit allowed")
 	}
+	if int64(entry.ch.Len()) == entry.recvCap {
+		r.table.RUnlock()
+		return errors.New("using one channel to receive from more than one net-chan?")
+	}
 	// do not swap Send and AddInt64 operations
 	entry.ch.Send(elem.val) // does not block
 	atomic.AddInt64(entry.received(), 1)
