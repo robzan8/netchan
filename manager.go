@@ -4,15 +4,12 @@ package netchan
 - more informative errors
 - more tests
 - fuzzy testing
-- uints in protocol?
 
 performance:
 - profile time and memory
-- do not call reflect.New each time an element arrives from the net
 - more sophisticated sender's select
 - more sophisticated credit sender
 - adjust ShutDown timeout
-- performance of logger (buffer log's writes)
 */
 
 import (
@@ -67,6 +64,8 @@ type Manager struct {
 }
 
 /*
+This graph shows how the goroutines and channels of a manager are organized:
+
  ----> +----------+       +---------+       +---------+       +----------+ ---->
  ----> |  sender  | ----> | encoder | ====> | decoder | ----> | receiver | ---->
  ----> +----------+       +---------+       +---------+       +----------+ ---->
@@ -75,6 +74,13 @@ type Manager struct {
        | credRecv | <---- | decoder | <==== | encoder | <---- | credSend |
        +----------+       +---------+       +---------+       +----------+
 
+The sender has a table that contains one entry for each channel that has been opened for
+sending. The user values flow through a pipeline from the sender to the receiver on the
+other side of the connection.
+Credits flow in the opposite direction. There is no cycle, as, for example, the sender
+shares the table with the credit receiver and they do not communicate through channels.
+The former graph is a simplification, because each manager has actually both a sender and
+a receiver:
 
  ----> +----------+                                                   +----------+ ---->
  ----> |  sender  | ---\                                         /--> | receiver | ---->
@@ -91,6 +97,12 @@ type Manager struct {
  <---- +----------+     /                                       \     +----------+ <----
  <---- | receiver | <--/                                         \--- |  sender  | <----
  <---- +----------+                                                   +----------+ <----
+
+To avoid deadlocked/leaking goroutines, termination must happen in pipeline order. For
+example, the sender and the credit sender both check periodically if an error occurred
+with Error(). If so, they close the channels to the encoder. The encoder does not check
+Error and keeps draining the channels until they are empty. Then it sends the error to
+the peer and closes the connection.
 */
 
 // Manage function starts a new Manager for the specified connection and returns it. The
@@ -110,9 +122,10 @@ func Manage(conn io.ReadWriteCloser) *Manager {
 // this manager and the manager shuts down.
 func ManageLimit(conn io.ReadWriteCloser, msgSizeLimit int) *Manager {
 	if msgSizeLimit <= 0 {
-		// use default
 		msgSizeLimit = 32 * 1024
 	}
+	// Nothing special happens here: we create all the components,
+	// connect them with channels and fire up the goroutines.
 
 	send := new(sender)
 	recv := new(receiver)
@@ -187,7 +200,16 @@ func (e *errAlreadyOpen) Error() string {
 // handled by the manager. The channel argument must be a channel and will be used for
 // receiving or sending data on this net-chan.
 //
-// If the direction is Recv, the channel must have a buffer capacity greater than 0.
+// If the direction is Recv, the following rules apply: channel must be buffered and its
+// buffer must be empty (cap(channel) > 0 && len(channel) == 0). The channel must be used
+// only for receiving values from a single net-chan. Sending values on the channel or
+// using it as receiver for multiple net-chans will result in
+//
+// If the direction is Send, the restrictions do not apply. It's possible to use the same
+// channel to send on multiple net-chans. The values will be distributed pseudo-randomly
+// to the different net-chans. Closing the channel will close all the associated
+// net-chans.
+//
 // Opening a net-chan twice, i.e. with the same name and direction on the same manager,
 // will return an error.
 //
@@ -232,14 +254,7 @@ func (m *Manager) Error() error {
 // ErrorSignal returns a channel that never receives any message and is closed when an
 // error occurs on this manager.
 func (m *Manager) ErrorSignal() <-chan struct{} {
-	// make this scale with multiple channels?
 	return m.errOnce.done
-}
-
-func (m *Manager) closeConn() {
-	m.closeOnce.Do(func() {
-		m.closeErr = m.conn.Close()
-	})
 }
 
 // ShutDown tries to send a termination message to the peer and then shuts down the
@@ -254,6 +269,12 @@ func (m *Manager) ShutDown() error {
 	return m.ShutDownWith(io.EOF)
 }
 
+func (m *Manager) closeConn() {
+	m.closeOnce.Do(func() {
+		m.closeErr = m.conn.Close()
+	})
+}
+
 // ShutDownWith is like ShutDown, but err is signaled instead of EOF.
 func (m *Manager) ShutDownWith(err error) error {
 	if err == nil {
@@ -266,9 +287,7 @@ func (m *Manager) ShutDownWith(err error) error {
 	// encoder tries to send error to peer; if/when it succeeds,
 	// it closes the connection and we wake up and return
 	case <-m.closeOnce.done:
-	// if encoder takes too long, we close the connection ourself;
-	// this timeout should take into account the whole pipeline from the
-	// sender's select to the encoder sending the error message to peer
+	// if encoder takes too long, we close the connection ourself
 	case <-time.After(5 * time.Second):
 		m.closeConn()
 	}

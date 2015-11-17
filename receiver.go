@@ -7,15 +7,15 @@ import (
 	"time"
 )
 
-// receiver receives elements from the decoder and sends them to the user channels.
+// The receiver receives elements from the decoder and sends them to the user channels
+// that are registered in its table (see the graph in manager.go).
 type receiver struct {
 	elemCh <-chan element
 	table  *chanTable
 	mn     *Manager
 }
 
-// Open a new net-chan for receiving. We set the init field of the new entry to true, so
-// that the credit sender knows it has to send the initial credit.
+// Open a net-chan for receiving.
 func (r *receiver) open(name string, ch reflect.Value) error {
 	r.table.Lock()
 	defer r.table.Unlock()
@@ -25,8 +25,7 @@ func (r *receiver) open(name string, ch reflect.Value) error {
 	if entry != nil {
 		return &errAlreadyOpen{name, Recv}
 	}
-	// the position where the entry is added will
-	// actually determine the net-chan's id
+	// The position where the entry is added will determine the net-chan's id.
 	r.table.t = addEntry(r.table.t, chanEntry{
 		name:    hName,
 		present: true,
@@ -37,7 +36,7 @@ func (r *receiver) open(name string, ch reflect.Value) error {
 	return nil
 }
 
-// got an element from the decoder
+// Got an element from the decoder.
 func (r *receiver) handleElem(elem element) error {
 	r.table.RLock()
 
@@ -50,9 +49,10 @@ func (r *receiver) handleElem(elem element) error {
 		r.table.RUnlock()
 		return errInvalidId
 	}
-	if !elem.ok { // netchan closed
+	if !elem.ok {
+		// net-chan closed, delete the entry.
 		r.table.RUnlock()
-		// entry pointer can become invalid here
+		// entry pointer can become invalid here.
 		r.table.Lock()
 		r.table.t[elem.id].ch.Close()
 		r.table.t[elem.id] = chanEntry{}
@@ -61,17 +61,17 @@ func (r *receiver) handleElem(elem element) error {
 	}
 	if atomic.LoadInt64(entry.received()) >= entry.recvCap {
 		r.table.RUnlock()
-		return errors.New("netchan Manager: peer sent more than its credit allowed")
+		return errors.New("netchan: peer sent more than its credit allowed")
 	}
 	if int64(entry.ch.Len()) == entry.recvCap {
 		r.table.RUnlock()
-		return errors.New(
-			"netchan: peer did not exceed its credit and yet the receive buffer is " +
-				"full. Are you using one channel to receive from multiple net-chans?",
+		return errors.New("netchan: " +
+			"peer did not exceed its credit and yet the receive buffer is full; " +
+			"check the restrictions for Open(Recv) in the docs.",
 		)
 	}
-	// do not swap the next two lines
-	entry.ch.Send(elem.val) // does not block (when the library not misused)
+	// Do not swap the next two lines.
+	entry.ch.Send(elem.val) // should not block
 	atomic.AddInt64(entry.received(), 1)
 	r.table.RUnlock()
 	return nil
@@ -81,7 +81,7 @@ func (r *receiver) run() {
 	for {
 		elem, ok := <-r.elemCh
 		if !ok {
-			// error occurred and decoder shut down
+			// An error occurred and decoder shut down.
 			return
 		}
 		err := r.handleElem(elem)
@@ -120,19 +120,21 @@ func (s *credSender) updateCredits() {
 		if !entry.present {
 			continue
 		}
-		// do not swap the next two lines
+		// Do not swap the next two lines.
 		received := atomic.LoadInt64(entry.received())
 		chLen := int64(entry.ch.Len())
 		consumed := received - chLen
 		if entry.init {
+			// Initial credit must be sent.
 			s.credits = append(s.credits, credit{id, entry.recvCap, &entry.name})
 			entry.init = false
 		} else if consumed*2 >= entry.recvCap { // i.e. consumed >= ceil(recvCap/2)
+			// Regular credit must be sent.
 			s.credits = append(s.credits, credit{id, consumed, nil})
-			// forget about the messages the user consumed
+			// Forget about the messages the user consumed.
 			atomic.AddInt64(entry.received(), -consumed)
 		}
-		// TODO: when much time passes, send credit even if it's small
+		// TODO: when much time passes, send credit even if it's small.
 	}
 	s.table.RUnlock()
 }

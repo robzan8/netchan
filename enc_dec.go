@@ -8,24 +8,29 @@ import (
 	"reflect"
 )
 
-type msgType int
-
 const (
-	helloMsg = 1 + iota
+	helloMsg int = 1 + iota
+	// element messages
 	elemMsg
 	initElemMsg
 	closeMsg
+	// credit messages
 	creditMsg
 	initCredMsg
+	// error messages
 	errorMsg
 	netErrorMsg
+
+	lastReserved = 15
 )
 
+// preceedes every message
 type header struct {
-	MsgType msgType
-	ChanId  int
+	MsgType int
+	ChanID  int
 }
 
+// used to transmit errors that implement net.Error
 type netError struct {
 	Err         string
 	IsTimeout   bool
@@ -54,6 +59,8 @@ type encoder struct {
 }
 
 func (e *encoder) encodeVal(v reflect.Value) {
+	// when an encoding error occurs, encoder.err
+	// is set and all encode operations become NOPs
 	if e.err != nil {
 		return
 	}
@@ -70,6 +77,7 @@ func (e *encoder) encode(v interface{}) {
 func (e *encoder) run() {
 	e.encode(header{helloMsg, 0})
 
+	// exit loop when both channels have been closed
 	for e.elemCh != nil || e.creditCh != nil {
 		select {
 		case elem, ok := <-e.elemCh:
@@ -109,7 +117,6 @@ func (e *encoder) run() {
 		e.encode(header{errorMsg, 0})
 		e.encode(err.Error())
 	}
-	// error message in flight can be discarded?
 	e.mn.closeConn()
 }
 
@@ -119,8 +126,7 @@ var (
 	errInvalidMsgType = errors.New("netchan: message with invalid type received")
 )
 
-// like io.LimitedReader, but returns a custom error, so that the beginner
-// user can understand that he is receiving too big gob messages
+// Like io.LimitedReader, but returns a custom error.
 type limitedReader struct {
 	R io.Reader // underlying reader
 	N int       // max bytes remaining
@@ -141,7 +147,7 @@ func (l *limitedReader) Read(p []byte) (n int, err error) {
 type decoder struct {
 	toReceiver   chan<- element
 	toCredRecv   chan<- credit
-	table        *chanTable
+	table        *chanTable // same table of receiver, needed for type information
 	mn           *Manager
 	msgSizeLimit int
 	limReader    limitedReader
@@ -169,7 +175,9 @@ func (d *decoder) run() (err error) {
 	if err != nil {
 		return
 	}
-	// check and log that hello msg has been received
+	if h.MsgType != helloMsg {
+		return errors.New("netchan: first message is not hello.")
+	}
 	for {
 		if err = d.mn.Error(); err != nil {
 			return
@@ -179,12 +187,12 @@ func (d *decoder) run() (err error) {
 		if err != nil {
 			return
 		}
-		if h.ChanId < 0 {
+		if h.ChanID < 0 {
 			return errInvalidId
 		}
 		switch h.MsgType {
 		case elemMsg:
-			elem := element{id: h.ChanId, ok: true}
+			elem := element{id: h.ChanID, ok: true}
 			d.table.RLock()
 			if elem.id >= len(d.table.t) || !d.table.t[elem.id].present {
 				d.table.RUnlock()
@@ -205,13 +213,13 @@ func (d *decoder) run() (err error) {
 			if err != nil {
 				return
 			}
-			panic("log name here?")
+			// we don't do
 
 		case closeMsg:
-			d.toReceiver <- element{id: h.ChanId, ok: false}
+			d.toReceiver <- element{id: h.ChanID, ok: false}
 
 		case creditMsg, initCredMsg:
-			cred := credit{id: h.ChanId}
+			cred := credit{id: h.ChanID}
 			err = d.decode(&cred.incr)
 			if err != nil {
 				return
@@ -248,7 +256,9 @@ func (d *decoder) run() (err error) {
 			return netErr
 
 		default:
-			return errInvalidMsgType
+			if h.MsgType == 0 || h.MsgType > lastReserved {
+				return errInvalidMsgType
+			}
 		}
 	}
 }

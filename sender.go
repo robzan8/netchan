@@ -8,7 +8,7 @@ import (
 )
 
 // The sender receives from the user channels that are registered in its table and sends
-// the messages to the encoder. To see its role in the bigger picture, see manager.go.
+// the messages to the encoder (see the graph in manager.go).
 type sender struct {
 	toEncoder chan<- element
 	table     *chanTable
@@ -23,10 +23,11 @@ func (s *sender) init() {
 	s.ids = []int{-1}
 }
 
+// Open a net-chan for sending.
 // When a new net-chan is opened, the receiver chooses its id. Then it sends an initial
 // credit message to the sender, communicating the id and the receive buffer capacity.
 // Two scenarios are possible:
-// 1) The initial credit arrives (see handleInitCred), then the user calls Open(Send):
+// 1) The initial credit arrives, then the user calls Open(Send):
 //     In this case, the entry is added to the table when the credit arrives, with a zero
 //     ch. When open is called, the entry is patched with the channel value provided by
 //     the user.
@@ -41,19 +42,19 @@ func (s *sender) open(name string, ch reflect.Value) error {
 	hName := hashName(name)
 	entry := entryByName(s.table.t, hName)
 	if entry != nil {
+		// Initial credit already arrived.
 		if entry.ch != (reflect.Value{}) {
 			return &errAlreadyOpen{name, Send}
 		}
-		// open scenario 1
 		entry.init = true
 		entry.ch = ch
 		return nil
 	}
+	// Initial credit did not arrive yet.
 	pend := entryByName(s.table.pending, hName)
 	if pend != nil {
 		return &errAlreadyOpen{name, Send}
 	}
-	// open scenario 2
 	s.table.pending = addEntry(s.table.pending, chanEntry{
 		name:    hName,
 		present: true,
@@ -63,13 +64,13 @@ func (s *sender) open(name string, ch reflect.Value) error {
 	return nil
 }
 
-// An element was taken out of a user's channel. s.table is Rlocked, see sender.run.
+// An element was taken out of a user's channel. s.table is Rlocked (see sender.run).
 func (s *sender) handleElem(elem element) {
 	if elem.ok {
 		atomic.AddInt64(s.table.t[elem.id].credit(), -1)
 		s.table.RUnlock()
 	} else {
-		// channel closed, delete the entry
+		// net-chan closed, delete the entry.
 		s.table.RUnlock()
 		s.table.Lock()
 		s.table.t[elem.id] = chanEntry{}
@@ -103,6 +104,7 @@ func (s *sender) run() {
 			s.handleElem(element{s.ids[i], val, ok, nil})
 			// handleElem does table.RUnlock()
 		default:
+			// No elements from the user, retry later.
 			s.table.RUnlock()
 			time.Sleep(10 * time.Millisecond)
 		}
@@ -121,7 +123,7 @@ func (r *credReceiver) run() {
 	for {
 		cred, ok := <-r.creditCh
 		if !ok {
-			// error occurred and decoder shut down
+			// An error occurred and decoder shut down.
 			return
 		}
 		var err error
@@ -136,7 +138,7 @@ func (r *credReceiver) run() {
 	}
 }
 
-// got a credit from the decoder.
+// Got a credit from the decoder.
 func (r *credReceiver) handleCred(cred credit) error {
 	r.table.RLock()
 
@@ -146,7 +148,7 @@ func (r *credReceiver) handleCred(cred credit) error {
 	}
 	entry := &r.table.t[cred.id]
 	if !entry.present {
-		// it may happen that the entry is not present,
+		// It may happen that the entry is not present,
 		// because the channel has just been closed; no problem.
 		r.table.RUnlock()
 		return nil
@@ -154,27 +156,29 @@ func (r *credReceiver) handleCred(cred credit) error {
 	newCred := atomic.AddInt64(entry.credit(), cred.incr)
 	if newCred > entry.recvCap {
 		r.table.RUnlock()
-		return errors.New("too much credit!")
+		return errors.New("netchan: too much credit received.")
 	}
 	r.table.RUnlock()
 	return nil
 }
 
+// A couple of checks to make sure that the other peer is not trying to force us to
+// allocate memory.
+// "holes" check:
+//     When a net-chan gets closed, we set to zero its entry in the table, but we can't
+//     recompact the table because ids are indices in the table. If there are a lot of
+//     holes and yet the peer wants to open a new net-chan with a fresh id, we shut down
+//     with an error.
+// "half-open" check:
+//     When we receive an initial credit message, we have to store an entry in the table
+//     and we say that the net-chan is half-open, until the user calls Open(Send)
+//     locally. When we see too many half-open net-chans, we assume it's a "syn-flood"
+//     attack and shut down with an error.
 const (
 	maxHoles    = 256
 	maxHalfOpen = 256
 )
 
-// A couple of checks to make sure that the other peer is not trying to force us to
-// allocate memory.
-// "holes" check:
-//     When a net-chan gets closed, we set to zero its entry in the table, but we can't
-//     recompact the table because of the IDs. If there are a lot of holes and yet the
-//     peer wants to open a new net-chan with a fresh id, we shut down with an error.
-// "half-open" check:
-//     When we receive an initial credit message, we have to store an entry in the table
-//     and we say that the net-chan is half-open, until the user calls Open(Send)
-//     locally. When we see too many half-open net-chans, we shut down with an error.
 func sanityCheck(table []chanEntry) (manyHoles, manyHalfOpen bool) {
 	var holes, halfOpen int
 	for i := range table {
@@ -187,17 +191,18 @@ func sanityCheck(table []chanEntry) (manyHoles, manyHalfOpen bool) {
 	return holes > maxHoles, halfOpen > maxHalfOpen
 }
 
+// An initial credit arrived.
 func (r *credReceiver) handleInitCred(cred credit) error {
 	r.table.Lock()
 	defer r.table.Unlock()
 
 	entry := entryByName(r.table.t, *cred.name)
 	if entry != nil {
-		return errors.New("netchan Manager: initial credit for already open net-chan")
+		return errors.New("netchan: initial credit arrived for already open net-chan.")
 	}
 	manyHoles, manyHalfOpen := sanityCheck(r.table.t)
 	if manyHalfOpen {
-		return errors.New("netchan Manager: too many half open net-chans")
+		return errors.New("netchan: too many half open net-chans.")
 	}
 
 	newEntry := chanEntry{
@@ -208,23 +213,23 @@ func (r *credReceiver) handleInitCred(cred credit) error {
 	}
 	pend := entryByName(r.table.pending, *cred.name)
 	if pend != nil {
-		// open scenario 2
+		// User already called Open(Send).
 		newEntry.init = pend.init
 		newEntry.ch = pend.ch
 		*pend = chanEntry{}
 	}
 	if cred.id == len(r.table.t) {
-		// id is a fresh slot
+		// id is a fresh slot.
 		if manyHoles {
-			return errors.New("netchan Manager: peer does not recycle old net-chan IDs")
+			return errors.New("netchan: peer does not recycle old net-chan IDs")
 		}
 		r.table.t = append(r.table.t, newEntry)
 		return nil
 	}
 	if cred.id < len(r.table.t) {
-		// id is a recycled slot
+		// id is a recycled slot.
 		if r.table.t[cred.id].present {
-			// but it's not free
+			// But it's not free.
 			return errInvalidId
 		}
 		r.table.t[cred.id] = newEntry
