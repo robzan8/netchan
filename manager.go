@@ -1,7 +1,6 @@
 package netchan
 
 /* TODO:
-- more informative errors
 - more tests
 - fuzzy testing
 
@@ -14,8 +13,6 @@ performance:
 
 import (
 	"encoding/gob"
-	"errors"
-	"fmt"
 	"io"
 	"reflect"
 	"sync/atomic"
@@ -186,16 +183,6 @@ func (d Dir) String() string {
 	return "???"
 }
 
-type errAlreadyOpen struct {
-	name string
-	dir  Dir
-}
-
-func (e *errAlreadyOpen) Error() string {
-	return fmt.Sprintf("netchan Open: net-chan \"%s\" is already open with dir %s\n",
-		e.name, e.dir)
-}
-
 // Open method opens a net-chan with the given name and direction on the connection
 // handled by the manager. The channel argument must be a channel and will be used for
 // receiving or sending data on this net-chan.
@@ -219,26 +206,26 @@ func (e *errAlreadyOpen) Error() string {
 func (m *Manager) Open(name string, dir Dir, channel interface{}) error {
 	ch := reflect.ValueOf(channel)
 	if ch.Kind() != reflect.Chan {
-		return errors.New("netchan Open: channel arg is not a channel")
+		return newErr("Open: channel is not a channel")
 	}
 	if dir == Recv {
 		if ch.Cap() == 0 {
-			return errors.New("netchan Open: Recv dir requires a buffered channel")
+			return newErr("Open: Recv requires a buffered channel")
 		}
 		if ch.Type().ChanDir()&reflect.SendDir == 0 {
 			// manager will not be able to send messages to ch for the user to receive
-			return errors.New("netchan Open: Recv dir requires a chan<-")
+			return newErr("Open: Recv requires a chan<-")
 		}
 		return m.recv.open(name, ch)
 	}
 	if dir == Send {
 		if ch.Type().ChanDir()&reflect.RecvDir == 0 {
 			// manager will not be able to take messages from ch and forward them
-			return errors.New("netchan Open: Send dir requires a <-chan")
+			return newErr("Open: Send requires a <-chan")
 		}
 		return m.send.open(name, ch)
 	}
-	return errors.New("netchan Open: dir is not Recv nor Send")
+	return newErr("Open: dir is not Recv nor Send")
 }
 
 // Error returns the first error that occurred on this manager. If no error

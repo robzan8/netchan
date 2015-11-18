@@ -135,7 +135,7 @@ func TestCredits(t *testing.T) {
 	checkIntSlice(t, s)
 }
 
-func TestLimGobReader(t *testing.T) {
+func TestMsgSizeLimit(t *testing.T) {
 	sideA, sideB := newPipeConn()
 	go sliceProducer(t, sideA)
 	sliceConsumer(t, sideB)
@@ -194,10 +194,10 @@ func sliceConsumer(t *testing.T, conn io.ReadWriteCloser) {
 		// i == numSlices, expect errSizeExceeded
 		select {
 		case <-ch:
-			t.Error("LimGobReader did not block too big message")
+			t.Error("manager did not block too big message")
 		case <-mn.ErrorSignal():
 			err := mn.Error()
-			if err.Error() == "netchan Manager: too big gob message received" {
+			if err == errTooBigMsg {
 				return // success
 			}
 			t.Error(err)

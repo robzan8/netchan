@@ -32,13 +32,13 @@ type header struct {
 
 // used to transmit errors that implement net.Error
 type netError struct {
-	Err         string
+	Str         string
 	IsTimeout   bool
 	IsTemporary bool
 }
 
 func (e *netError) Error() string {
-	return e.Err
+	return e.Str
 }
 
 func (e *netError) Timeout() bool {
@@ -120,21 +120,17 @@ func (e *encoder) run() {
 	e.mn.closeConn()
 }
 
-var (
-	errInvalidId      = errors.New("netchan: message with invalid id received")
-	errInvalidCred    = errors.New("netchan: credit with non-positive value received")
-	errInvalidMsgType = errors.New("netchan: message with invalid type received")
-)
-
 // Like io.LimitedReader, but returns a custom error.
 type limitedReader struct {
 	R io.Reader // underlying reader
 	N int       // max bytes remaining
 }
 
+var errTooBigMsg = newErr("too big gob message received")
+
 func (l *limitedReader) Read(p []byte) (n int, err error) {
 	if l.N <= 0 {
-		return 0, errors.New("netchan Manager: too big gob message received")
+		return 0, errTooBigMsg
 	}
 	if len(p) > l.N {
 		p = p[0:l.N]
@@ -176,7 +172,7 @@ func (d *decoder) run() (err error) {
 		return
 	}
 	if h.MsgType != helloMsg {
-		return errors.New("netchan: first message is not hello.")
+		return fmtErr("expecting hello message, got MsgType %d", h.MsgType)
 	}
 	for {
 		if err = d.mn.Error(); err != nil {
@@ -225,7 +221,7 @@ func (d *decoder) run() (err error) {
 				return
 			}
 			if cred.incr <= 0 {
-				return errInvalidCred
+				return newErr("credit with non-positive value received")
 			}
 			if h.MsgType == initCredMsg {
 				cred.name = new(hashedName)
@@ -245,7 +241,7 @@ func (d *decoder) run() (err error) {
 			if errString == io.EOF.Error() {
 				return io.EOF
 			}
-			return errors.New(errString)
+			return errors.New("netchan error from peer: " + errString)
 
 		case netErrorMsg:
 			netErr := new(netError)
@@ -253,11 +249,12 @@ func (d *decoder) run() (err error) {
 			if err != nil {
 				return
 			}
+			netErr.Str = "netchan error from peer: " + netErr.Str
 			return netErr
 
 		default:
 			if h.MsgType == 0 || h.MsgType > lastReserved {
-				return errInvalidMsgType
+				return fmtErr("received message with invalid type: %d", h.MsgType)
 			}
 		}
 	}

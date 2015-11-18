@@ -1,7 +1,6 @@
 package netchan
 
 import (
-	"errors"
 	"reflect"
 	"sync/atomic"
 	"time"
@@ -44,7 +43,7 @@ func (s *sender) open(name string, ch reflect.Value) error {
 	if entry != nil {
 		// Initial credit already arrived.
 		if entry.ch != (reflect.Value{}) {
-			return &errAlreadyOpen{name, Send}
+			return errAlreadyOpen(name, Send)
 		}
 		entry.init = true
 		entry.ch = ch
@@ -53,7 +52,7 @@ func (s *sender) open(name string, ch reflect.Value) error {
 	// Initial credit did not arrive yet.
 	pend := entryByName(s.table.pending, hName)
 	if pend != nil {
-		return &errAlreadyOpen{name, Send}
+		return errAlreadyOpen(name, Send)
 	}
 	s.table.pending = addEntry(s.table.pending, chanEntry{
 		name:    hName,
@@ -156,7 +155,7 @@ func (r *credReceiver) handleCred(cred credit) error {
 	newCred := atomic.AddInt64(entry.credit(), cred.incr)
 	if newCred > entry.recvCap {
 		r.table.RUnlock()
-		return errors.New("netchan: too much credit received.")
+		return newErr("too much credit received")
 	}
 	r.table.RUnlock()
 	return nil
@@ -198,11 +197,11 @@ func (r *credReceiver) handleInitCred(cred credit) error {
 
 	entry := entryByName(r.table.t, *cred.name)
 	if entry != nil {
-		return errors.New("netchan: initial credit arrived for already open net-chan.")
+		return fmtErr("initial credit arrived for already open channel %s", *cred.name)
 	}
 	manyHoles, manyHalfOpen := sanityCheck(r.table.t)
 	if manyHalfOpen {
-		return errors.New("netchan: too many half open net-chans.")
+		return newErr("too many half open channels")
 	}
 
 	newEntry := chanEntry{
@@ -221,7 +220,7 @@ func (r *credReceiver) handleInitCred(cred credit) error {
 	if cred.id == len(r.table.t) {
 		// id is a fresh slot.
 		if manyHoles {
-			return errors.New("netchan: peer does not recycle old net-chan IDs")
+			return newErr("peer does not reuse IDs of closed channels")
 		}
 		r.table.t = append(r.table.t, newEntry)
 		return nil
@@ -230,7 +229,7 @@ func (r *credReceiver) handleInitCred(cred credit) error {
 		// id is a recycled slot.
 		if r.table.t[cred.id].present {
 			// But it's not free.
-			return errInvalidId
+			return newErr("initial credit arrived with ID alredy taken")
 		}
 		r.table.t[cred.id] = newEntry
 		return nil

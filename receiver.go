@@ -1,7 +1,6 @@
 package netchan
 
 import (
-	"errors"
 	"reflect"
 	"sync/atomic"
 	"time"
@@ -23,7 +22,7 @@ func (r *receiver) open(name string, ch reflect.Value) error {
 	hName := hashName(name)
 	entry := entryByName(r.table.t, hName)
 	if entry != nil {
-		return &errAlreadyOpen{name, Recv}
+		return errAlreadyOpen(name, Recv)
 	}
 	// The position where the entry is added will determine the net-chan's id.
 	r.table.t = addEntry(r.table.t, chanEntry{
@@ -47,7 +46,7 @@ func (r *receiver) handleElem(elem element) error {
 	entry := &r.table.t[elem.id]
 	if !entry.present {
 		r.table.RUnlock()
-		return errInvalidId
+		return newErr("element arrived for deleted channel")
 	}
 	if !elem.ok {
 		// net-chan closed, delete the entry.
@@ -61,14 +60,12 @@ func (r *receiver) handleElem(elem element) error {
 	}
 	if atomic.LoadInt64(entry.received()) >= entry.recvCap {
 		r.table.RUnlock()
-		return errors.New("netchan: peer sent more than its credit allowed")
+		return newErr("peer sent more than its credit allowed")
 	}
 	if int64(entry.ch.Len()) == entry.recvCap {
 		r.table.RUnlock()
-		return errors.New("netchan: " +
-			"peer did not exceed its credit and yet the receive buffer is full; " +
-			"check the restrictions for Open(Recv) in the docs.",
-		)
+		return newErr("peer did not exceed its credit and yet the receive buffer" +
+			" is full; check the restrictions for Open(Recv) in the docs")
 	}
 	// Do not swap the next two lines.
 	entry.ch.Send(elem.val) // should not block

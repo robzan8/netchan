@@ -2,6 +2,8 @@ package netchan
 
 import (
 	"crypto/sha1"
+	"errors"
+	"fmt"
 	"reflect"
 	"sync"
 )
@@ -76,4 +78,18 @@ func addEntry(table []chanEntry, entry chanEntry) (newTable []chanEntry) {
 		}
 	}
 	return append(table, entry)
+}
+
+func newErr(str string) error {
+	return errors.New("netchan: " + str)
+}
+
+var errInvalidId = newErr("message with invalid id received")
+
+func fmtErr(format string, a ...interface{}) error {
+	return fmt.Errorf("netchan: "+format, a...)
+}
+
+func errAlreadyOpen(name string, dir Dir) error {
+	return fmtErr("Open: channel %s already open with dir %s", name, dir)
 }
