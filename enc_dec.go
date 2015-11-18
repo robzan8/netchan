@@ -126,11 +126,11 @@ type limitedReader struct {
 	N int       // max bytes remaining
 }
 
-var errTooBigMsg = newErr("too big gob message received")
+var errMsgTooBig = newErr("too big gob message received")
 
 func (l *limitedReader) Read(p []byte) (n int, err error) {
 	if l.N <= 0 {
-		return 0, errTooBigMsg
+		return 0, errMsgTooBig
 	}
 	if len(p) > l.N {
 		p = p[0:l.N]

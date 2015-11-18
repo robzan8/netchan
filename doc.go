@@ -34,7 +34,7 @@ On the receive side:
 		fmt.Println(i)
 	}
 
-All methods that Manager provides are thread-safe.
+All methods that Manager provides can be called safely from multiple goroutines.
 
 Netchan uses gob to serialize messages (https://golang.org/pkg/encoding/gob/). Any data
 to be transmitted using netchan must obey gob's laws. In particular, channels cannot be
@@ -74,6 +74,28 @@ The receive channel capacity can affect performance: a small buffer could cause 
 sender to suspend often, waiting for credit; a big buffer could avoid suspensions
 completely.
 
+Concurrency patterns
+
+The only restriction that the control flow system imposes is that each net-chan must have
+a dedicated buffered channel for receiving and no one else should be sending to that
+channel. So, to implement a fan-in of net-chans, a goroutine that reads from the various
+buffered channels is necessary.
+
+To implement a fan-out, instead, the same Go channel can be used to open different
+net-chans (possibly on different managers/connections) with Send direction. The messages
+arriving on the channel will be distributed pseudo-randomly to the various net-chans with
+positive credit. This implies that we get automatic load balacing: if one of the
+receivers is slower, it will send credit and thus receive messages at a lower rate.
+Closing the channel will close all the net-chans in the fan-out.
+
+RPC-like functionality can be implemented by sending a request together with a net-chan
+name, that will be opened for the response. However, opening a net-chan for each response
+is not ideal in terms of performance. When possible, model your application logic in
+terms of streams of data instead of requests-responses, it's where netchan and gob shine
+best.
+
+timeouts and quit channels.
+
 Security
 
 The netchan protocol is designed to be secure, is extremely simple and is tested also
@@ -86,13 +108,18 @@ netchan-based API, no malicious client should be able to:
 Netchan protocol
 
 The protocol is simple and precise. Every deviation from the protocol causes an error and
-every error is fatal. It involves no retransmissions nor timing issues, the underlying
+every error is fatal. To give some examples: a request for opening a channel that is
+already open, data for a net-chan that has been closed, a credit message with a negative
+value: all fatal errors.
+
+The protocol involves no retransmissions nor timing issues, the underlying
 connection must take care of delivering data in order and with best-effort reliability.
-Netchan uses gob for encoding and decoding data. Each netchan message is preceded by an
-header defined as:
+
+Netchan uses gob for encoding data. Each netchan message is preceded by an header defined
+as:
 	type header struct {
 		MsgType int // type of the message immediately following
-		ChanId  int // ID of the net-chan this message is directed to
+		ChanID  int // ID of the net-chan this message is directed to
 	}
 
 Possible message types are:
@@ -165,5 +192,7 @@ implement the net.Error interface are encoded follow, to preserve the interface:
 	enc.Encode(header{netErrorMsg, 0})
 	enc.Encode(netErr) // a netError
 
+document hashedName
+separate receive and send subsystems
 */
 package netchan

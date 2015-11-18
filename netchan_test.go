@@ -197,7 +197,7 @@ func sliceConsumer(t *testing.T, conn io.ReadWriteCloser) {
 			t.Error("manager did not block too big message")
 		case <-mn.ErrorSignal():
 			err := mn.Error()
-			if err == errTooBigMsg {
+			if err == errMsgTooBig {
 				return // success
 			}
 			t.Error(err)

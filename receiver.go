@@ -46,7 +46,7 @@ func (r *receiver) handleElem(elem element) error {
 	entry := &r.table.t[elem.id]
 	if !entry.present {
 		r.table.RUnlock()
-		return newErr("element arrived for deleted channel")
+		return newErr("element arrived for deleted net-chan")
 	}
 	if !elem.ok {
 		// net-chan closed, delete the entry.

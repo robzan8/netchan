@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"strconv"
 	"sync"
 )
 
@@ -84,12 +85,13 @@ func newErr(str string) error {
 	return errors.New("netchan: " + str)
 }
 
-var errInvalidId = newErr("message with invalid id received")
+var errInvalidId = newErr("message with invalid ID received")
 
 func fmtErr(format string, a ...interface{}) error {
 	return fmt.Errorf("netchan: "+format, a...)
 }
 
 func errAlreadyOpen(name string, dir Dir) error {
-	return fmtErr("Open: channel %s already open with dir %s", name, dir)
+	return fmtErr("Open: net-chan %s is already open with dir %s",
+		strconv.Quote(name), dir)
 }

@@ -197,11 +197,11 @@ func (r *credReceiver) handleInitCred(cred credit) error {
 
 	entry := entryByName(r.table.t, *cred.name)
 	if entry != nil {
-		return fmtErr("initial credit arrived for already open channel %s", *cred.name)
+		return newErr("initial credit arrived for already open net-chan")
 	}
 	manyHoles, manyHalfOpen := sanityCheck(r.table.t)
 	if manyHalfOpen {
-		return newErr("too many half open channels")
+		return newErr("too many half open net-chans")
 	}
 
 	newEntry := chanEntry{
@@ -220,7 +220,7 @@ func (r *credReceiver) handleInitCred(cred credit) error {
 	if cred.id == len(r.table.t) {
 		// id is a fresh slot.
 		if manyHoles {
-			return newErr("peer does not reuse IDs of closed channels")
+			return newErr("peer does not reuse IDs of closed net-chans")
 		}
 		r.table.t = append(r.table.t, newEntry)
 		return nil

@@ -121,9 +121,8 @@ func ManageLimit(conn io.ReadWriteCloser, msgSizeLimit int) *Manager {
 	if msgSizeLimit <= 0 {
 		msgSizeLimit = 32 * 1024
 	}
-	// Nothing special happens here: we create all the components,
-	// connect them with channels and fire up the goroutines.
 
+	// create all the components, connect them with channels and fire up the goroutines.
 	send := new(sender)
 	recv := new(receiver)
 	mn := &Manager{conn: conn, send: send, recv: recv}
@@ -200,6 +199,8 @@ func (d Dir) String() string {
 // Opening a net-chan twice, i.e. with the same name and direction on the same manager,
 // will return an error.
 //
+// error will not be signaled
+//
 // To close a net-chan, close the channel used for sending; the receiving channel on the
 // other peer will be closed too. Messages that are already in the buffers or in flight
 // will not be lost.
@@ -210,17 +211,19 @@ func (m *Manager) Open(name string, dir Dir, channel interface{}) error {
 	}
 	if dir == Recv {
 		if ch.Cap() == 0 {
-			return newErr("Open: Recv requires a buffered channel")
+			return newErr("Open: Recv dir requires a buffered channel")
+		}
+		if ch.Len() != 0 {
+			return newErr("Open: Recv dir requires an empty, dedicated channel (i.e. " +
+				"len(channel) == 0 and the channel should be used for receiving only")
 		}
 		if ch.Type().ChanDir()&reflect.SendDir == 0 {
-			// manager will not be able to send messages to ch for the user to receive
 			return newErr("Open: Recv requires a chan<-")
 		}
 		return m.recv.open(name, ch)
 	}
 	if dir == Send {
 		if ch.Type().ChanDir()&reflect.RecvDir == 0 {
-			// manager will not be able to take messages from ch and forward them
 			return newErr("Open: Send requires a <-chan")
 		}
 		return m.send.open(name, ch)
