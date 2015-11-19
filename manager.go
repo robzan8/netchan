@@ -5,6 +5,8 @@ package netchan
 - fuzzy testing
 
 performance:
+- errorsignal scales? is it inlined?
+
 - profile time and memory
 - more sophisticated sender's select
 - more sophisticated credit sender
@@ -164,24 +166,6 @@ func ManageLimit(conn io.ReadWriteCloser, msgSizeLimit int) *Manager {
 	return mn
 }
 
-// The direction of a net-chan from the perspective of the local side of the connection.
-type Dir int
-
-const (
-	Recv Dir = iota
-	Send
-)
-
-func (d Dir) String() string {
-	switch d {
-	case Recv:
-		return "Recv"
-	case Send:
-		return "Send"
-	}
-	return "???"
-}
-
 // Open method opens a net-chan with the given name and direction on the connection
 // handled by the manager. The channel argument must be a channel and will be used for
 // receiving or sending data on this net-chan.
@@ -201,31 +185,33 @@ func (d Dir) String() string {
 // To close a net-chan, close the channel used for sending; the receiving channel on the
 // other peer will be closed too. Messages that are already in the buffers or in flight
 // will not be lost.
-func (m *Manager) Open(name string, dir Dir, channel interface{}) error {
+func (m *Manager) OpenSend(name string, channel interface{}) error {
 	ch := reflect.ValueOf(channel)
 	if ch.Kind() != reflect.Chan {
-		return newErr("Open: channel is not a channel")
+		return newErr("OpenSend channel arg is not a channel")
 	}
-	if dir == Recv {
-		if ch.Cap() == 0 {
-			return newErr("Open: Recv dir requires a buffered channel")
-		}
-		if ch.Len() != 0 {
-			return newErr("Open: Recv dir requires an empty, dedicated channel (i.e. " +
-				"len(channel) == 0 and the channel should be used for receiving only")
-		}
-		if ch.Type().ChanDir()&reflect.SendDir == 0 {
-			return newErr("Open: Recv requires a chan<-")
-		}
-		return m.recv.open(name, ch)
+	if ch.Type().ChanDir()&reflect.RecvDir == 0 {
+		return newErr("OpenSend requires a <-chan")
 	}
-	if dir == Send {
-		if ch.Type().ChanDir()&reflect.RecvDir == 0 {
-			return newErr("Open: Send requires a <-chan")
-		}
-		return m.send.open(name, ch)
+	return m.send.open(name, ch)
+}
+
+func (m *Manager) OpenRecv(name string, channel interface{}, bufferCap int) error {
+	ch := reflect.ValueOf(channel)
+	if ch.Kind() != reflect.Chan {
+		return newErr("OpenRecv channel arg is not a channel")
 	}
-	return newErr("Open: dir is not Recv nor Send")
+	if ch.Type().ChanDir()&reflect.SendDir == 0 {
+		return newErr("OpenRecv requires a chan<-")
+	}
+	if ch.Cap() == 0 {
+		return newErr("Open: Recv dir requires a buffered channel")
+	}
+	if ch.Len() != 0 {
+		return newErr("Open: Recv dir requires an empty, dedicated channel (i.e. " +
+			"len(channel) == 0 and the channel should be used for receiving only")
+	}
+	return m.recv.open(name, ch)
 }
 
 // Error returns the first error that occurred on this manager. If no error

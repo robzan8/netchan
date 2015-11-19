@@ -3,23 +3,89 @@ package netchan
 import (
 	"reflect"
 	"sync/atomic"
-	"time"
 )
 
-// The sender receives from the user channels that are registered in its table and sends
-// the messages to the encoder (see the graph in manager.go).
 type sender struct {
+	id        int
+	userCh    reflect.Value
+	creditCh  <-chan int
 	toEncoder chan<- element
-	table     *chanTable
 	mn        *Manager
 
-	cases []reflect.SelectCase
-	ids   []int
+	credit  int
+	recvCap int
+	exit    bool
 }
 
-func (s *sender) init() {
-	s.cases = []reflect.SelectCase{reflect.SelectCase{Dir: reflect.SelectDefault}}
-	s.ids = []int{-1}
+// what happens if a credit arrives for a deleted channel?
+
+func (s *sender) receivedCredit(cred int) {
+	s.credit += cred
+	if s.credit > s.recvCap {
+		s.mn.ShutDownWith(newErr("too much credit received"))
+		s.exit = true
+	}
+}
+
+func (s *sender) sendToEncoder(val reflect.Value, ok bool) {
+	elem := element{s.id, val, ok, nil}
+	// Simply sending to the encoder could lead to deadlocks,
+	// also listen to the other channels
+	for {
+		select {
+		case s.toEncoder <- elem:
+			if !ok {
+				// net-chan has been closed
+				s.exit = true
+				return
+			}
+			s.credit-- // timing issues with credits?
+			return
+		case cred := <-s.creditCh:
+			receivedCredit(cred)
+		case <-s.mn.ErrorSignal():
+			s.exit = true
+			return
+		}
+	}
+}
+
+func (s *sender) run() {
+	recvSomething := [3]reflect.SelectCase{
+		{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(s.creditCh)},
+		{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(s.mn.ErrorSignal())},
+		{Dir: reflect.SelectRecv, Chan: s.userCh},
+	}
+	const (
+		recvCredit int = iota
+		recvError
+		recvUser
+	)
+	for !s.exit {
+		var numCases int
+		if s.credit > 0 {
+			numCases = 3
+		} else {
+			// Do not receive from user channel (3rd case).
+			numCases = 2
+		}
+		i, val, ok := reflect.Select(recvSomething[0:numCases])
+		switch i {
+		case recvCredit:
+			s.receivedCredit(val.Interface().(int))
+		case recvError:
+			return
+		case recvUser:
+			s.sendToEncoder(val, ok)
+		}
+	}
+}
+
+// credReceiver receives credits from the decoder and updates the channel table.
+type credReceiver struct {
+	creditCh <-chan credit
+	table    *chanTable // same table of the sender
+	mn       *Manager
 }
 
 // Open a net-chan for sending.
@@ -61,61 +127,6 @@ func (s *sender) open(name string, ch reflect.Value) error {
 		ch:      ch,
 	})
 	return nil
-}
-
-// An element was taken out of a user's channel. s.table is Rlocked (see sender.run).
-func (s *sender) handleElem(elem element) {
-	if elem.ok {
-		atomic.AddInt64(s.table.t[elem.id].credit(), -1)
-		s.table.RUnlock()
-	} else {
-		// net-chan closed, delete the entry.
-		s.table.RUnlock()
-		s.table.Lock()
-		s.table.t[elem.id] = chanEntry{}
-		s.table.Unlock()
-	}
-	s.toEncoder <- elem
-}
-
-func (s *sender) run() {
-	// TODO: check if there are entries (possibly pending) with init = true
-	// and send the initial element message.
-	for s.mn.Error() == nil {
-		s.table.RLock()
-
-		// Build a select that receives from all the user channels with positive credit.
-		// For each select case cases[i], the net-chan id is stored in ids[i].
-		// cases[0] is the default case.
-		s.cases = s.cases[0:1]
-		s.ids = s.ids[0:1]
-		for id := range s.table.t {
-			entry := &s.table.t[id]
-			if entry.present && atomic.LoadInt64(entry.credit()) > 0 {
-				s.cases = append(s.cases,
-					reflect.SelectCase{Dir: reflect.SelectRecv, Chan: entry.ch})
-				s.ids = append(s.ids, id)
-			}
-		}
-		i, val, ok := reflect.Select(s.cases)
-		switch {
-		case i > 0:
-			s.handleElem(element{s.ids[i], val, ok, nil})
-			// handleElem does table.RUnlock()
-		default:
-			// No elements from the user, retry later.
-			s.table.RUnlock()
-			time.Sleep(10 * time.Millisecond)
-		}
-	}
-	close(s.toEncoder)
-}
-
-// credReceiver receives credits from the decoder and updates the channel table.
-type credReceiver struct {
-	creditCh <-chan credit
-	table    *chanTable // same table of the sender
-	mn       *Manager
 }
 
 func (r *credReceiver) run() {
