@@ -205,10 +205,10 @@ func (r *credReceiver) handleInitCred(cred credit) error {
 	}
 
 	newEntry := chanEntry{
-		name:    *cred.name,
-		present: true,
-		numElem: cred.incr, // credit
-		recvCap: cred.incr,
+		name:     *cred.name,
+		present:  true,
+		numElems: cred.incr, // credit
+		recvCap:  cred.incr,
 	}
 	pend := entryByName(r.table.pending, *cred.name)
 	if pend != nil {

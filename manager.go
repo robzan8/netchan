@@ -71,7 +71,7 @@ This graph shows how the goroutines and channels of a manager are organized:
        | credRecv | <---- | decoder | <==== | encoder | <---- | credSend |
        +----------+       +---------+       +---------+       +----------+
 
-The sender has a table that contains one entry for each channel that has been opened for
+The sender has a table that contains an entry for each channel that has been opened for
 sending. The user values flow through a pipeline from the sender to the receiver on the
 other side of the connection.
 Credits flow in the opposite direction. There is no cycle, as, for example, the sender
@@ -187,19 +187,16 @@ func (d Dir) String() string {
 // receiving or sending data on this net-chan.
 //
 // If the direction is Recv, the following rules apply: channel must be buffered and its
-// buffer must be empty (cap(channel) > 0 && len(channel) == 0). The channel must be used
-// only for receiving values from a single net-chan. Sending values on the channel or
-// using it as receiver for multiple net-chans will result in
-//
-// If the direction is Send, the restrictions do not apply. It's possible to use the same
-// channel to send on multiple net-chans. The values will be distributed pseudo-randomly
-// to the different net-chans. Closing the channel will close all the associated
-// net-chans.
+// buffer must be empty (cap(channel) > 0 && len(channel) == 0); the channel must be used
+// exclusively for receiving values from a single net-chan.
 //
 // Opening a net-chan twice, i.e. with the same name and direction on the same manager,
-// will return an error.
+// will return an error. It is possible to have, on a single manager/connection, two
+// net-chans with the same name and opposite directions.
 //
-// error will not be signaled
+// An eventual error returned by Open does not compromise the netchan session, that is,
+// the error will not be caught by ErrorSignal and Error methods, will not be
+// communicated to the peer and the manager will not shut down.
 //
 // To close a net-chan, close the channel used for sending; the receiving channel on the
 // other peer will be closed too. Messages that are already in the buffers or in flight

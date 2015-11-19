@@ -58,7 +58,7 @@ func (r *receiver) handleElem(elem element) error {
 		r.table.Unlock()
 		return nil
 	}
-	if atomic.LoadInt64(entry.received()) >= entry.recvCap {
+	if atomic.LoadInt64(entry.buffered()) >= entry.recvCap {
 		r.table.RUnlock()
 		return newErr("peer sent more than its credit allowed")
 	}
@@ -69,7 +69,7 @@ func (r *receiver) handleElem(elem element) error {
 	}
 	// Do not swap the next two lines.
 	entry.ch.Send(elem.val) // should not block
-	atomic.AddInt64(entry.received(), 1)
+	atomic.AddInt64(entry.buffered(), 1)
 	r.table.RUnlock()
 	return nil
 }
@@ -118,9 +118,9 @@ func (s *credSender) updateCredits() {
 			continue
 		}
 		// Do not swap the next two lines.
-		received := atomic.LoadInt64(entry.received())
+		buffered := atomic.LoadInt64(entry.buffered())
 		chLen := int64(entry.ch.Len())
-		consumed := received - chLen
+		consumed := buffered - chLen
 		if entry.init {
 			// Initial credit must be sent.
 			s.credits = append(s.credits, credit{id, entry.recvCap, &entry.name})
@@ -129,7 +129,7 @@ func (s *credSender) updateCredits() {
 			// Regular credit must be sent.
 			s.credits = append(s.credits, credit{id, consumed, nil})
 			// Forget about the messages the user consumed.
-			atomic.AddInt64(entry.received(), -consumed)
+			atomic.AddInt64(entry.buffered(), -consumed)
 		}
 		// TODO: when much time passes, send credit even if it's small.
 	}

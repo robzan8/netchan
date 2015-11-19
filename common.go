@@ -16,49 +16,58 @@ func hashName(name string) hashedName {
 	return sha1.Sum([]byte(name))
 }
 
-// An element carries a user value.
+// element is used internally to represent messages of type:
+// elemMsg, initElemMsg and closeMsg.
 type element struct {
-	id   int           // id of the net-chan
+	id   int           // ID of the net-chan
 	val  reflect.Value // user data
-	ok   bool          // if !ok, the net-chan has been closed
-	name *hashedName
+	ok   bool          // if !ok, this is a closeMsg
+	name *hashedName   // if not nil, this is an initElemMsg (overrides !ok)
 }
 
-// credit represents a credit message.
+// credit represents messages of type:
+// creditMsg and initCredMsg.
 type credit struct {
-	id   int   // id of the net-chan
-	incr int64 // amount of credit
-	name *hashedName
+	id   int         // ID of the net-chan
+	incr int64       // amount of credit
+	name *hashedName // if not nil, this is an initCredMsg
 }
 
-// The sender keeps a table of all the net-chans opened for sending
-// and likewise does the receiver.
+// The sender component of a manager keeps a table of all the
+// net-chans opened for sending and likewise does the receiver.
 type chanTable struct {
-	sync.RWMutex
-	t       []chanEntry // the table
-	pending []chanEntry // only the sender uses this, see sender.go
+	sync.RWMutex             // protects remaining fields
+	t            []chanEntry // the table
+	pending      []chanEntry // only the sender uses this, see sender.go
 }
 
-// A channel entry in the sender's or receiver's table.
-// If init is true, the entry has just been added to the table and the initial credit
-// or initial element message must be sent.
-// ch holds the Go channel used for sending or receiving on this net-chan.
+// An entry in a chanTable. Keep its size 64 bytes on x64 if possible.
 type chanEntry struct {
-	name    hashedName // name of the net-chan
+	name hashedName // name of the net-chan
+
+	// present is set to false when the net-chan gets closed
+	// and the slot in the table can be reused.
 	present bool
-	init    bool
-	ch      reflect.Value
-	numElem int64
-	recvCap int64 // capacity of the receive channel
+
+	// If init is true, the entry has just been added and
+	// the initCredMsg or InitElemMsg has yet to be sent.
+	init bool
+
+	ch       reflect.Value // the Go channel from Open
+	numElems int64         // see credit() and buffered() below
+	recvCap  int64         // capacity of the receive channel
 }
 
-// For a channel opened for
+// For an entry in the sender's table,
+// numElem is the credit the sender has for the net-chan.
 func (e *chanEntry) credit() *int64 {
-	return &e.numElem
+	return &e.numElems
 }
 
-func (e *chanEntry) received() *int64 {
-	return &e.numElem
+// For an entry in the receiver's table,
+// numElem counts how many elements have been received and put in the buffer.
+func (e *chanEntry) buffered() *int64 {
+	return &e.numElems
 }
 
 func entryByName(table []chanEntry, name hashedName) *chanEntry {
@@ -74,6 +83,7 @@ func entryByName(table []chanEntry, name hashedName) *chanEntry {
 func addEntry(table []chanEntry, entry chanEntry) (newTable []chanEntry) {
 	for i := range table {
 		if !table[i].present {
+			// reuse empty slot
 			table[i] = entry
 			return table
 		}
