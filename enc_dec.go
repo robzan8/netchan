@@ -10,13 +10,16 @@ import (
 
 const (
 	helloMsg int = 1 + iota
+
 	// element messages
 	elemMsg
 	initElemMsg
 	closeMsg
+
 	// credit messages
 	creditMsg
 	initCredMsg
+
 	// error messages
 	errorMsg
 	netErrorMsg

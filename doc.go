@@ -28,7 +28,7 @@ On the send side:
 
 On the receive side:
 	mn := netchan.Manage(conn)
-	ch := make(chan int, 20) // channel used for receiving must be buffered
+	ch := make(chan int, 20) // the channel used for receiving must be buffered
 	err := mn.Open("integers", netchan.Recv, ch)
 	for i := range ch {
 		fmt.Println(i)
@@ -93,8 +93,6 @@ name, that will be opened for the response. However, opening a net-chan for each
 is not ideal in terms of performance. When possible, model your application logic in
 terms of streams of data instead of requests-responses, it's where netchan and gob shine
 best.
-
-timeouts and quit channels.
 
 Security
 
