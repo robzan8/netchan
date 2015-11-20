@@ -2,72 +2,79 @@ package netchan
 
 import "reflect"
 
-// what happens if a credit arrives for a deleted channel?
+type sender struct {
+	id        int
+	ch        reflect.Value
+	credits   <-chan int
+	toEncoder chan<- element
+	quit      bool
+	mn        *Manager
+}
 
-func sender(id int, mn *Manager, userCh reflect.Value,
-	creditCh <-chan int, toEncoder chan<- element) {
+// sender must tell to credRouter when channel is closed
+// credRouter can not block sending credit to a closed channel
 
-	const (
-		userIndex int = iota
-		creditIndex
-		encIndex
-		errorIndex
-		numCases
-	)
-	userCase := reflect.SelectCase{Dir: reflect.SelectRecv, Chan: userCh}
-	encCase := reflect.SelectCase{Dir: reflect.SelectSend, Chan: reflect.ValueOf(toEncoder)}
-	cases := [numCases]reflect.SelectCase{
-		{}, {Dir: reflect.SelectRecv, Chan: reflect.ValueOf(creditCh)},
-		{}, {Dir: reflect.SelectRecv, Chan: reflect.ValueOf(mn.ErrorSignal())},
-	}
-	credit := 0
-	sending := false
-	closed := false
+func (s *sender) sendToEncoder(val reflect.Value, ok bool) {
+	elem := element{s.id, val, ok, nil}
+	// Simply sending to the encoder could lead to deadlocks,
+	// also listen to the other channels
 	for {
-		i, val, ok := reflect.Select(cases[:])
-		switch i {
-		case userIndex:
-			// suspend receiving from user and start trying to send the element to encoder
-			cases[userIndex] = reflect.SelectCase{}
-			cases[encIndex] = encCase
-			cases[encIndex].Send = reflect.ValueOf(element{id, val, ok, nil})
-			sending = true
-			closed = !ok
-		case creditIndex:
-			if credit == 0 && !sending {
-				cases[userIndex] = userCase // start receiving from user again
-			}
-			credit += val.Interface().(int)
-		case encIndex:
-			if closed { // net-chan has been closed
+		select {
+		case s.toEncoder <- elem:
+			if !ok {
+				// net-chan has been closed
+				s.quit = true
 				return
 			}
-			credit--
-			if credit > 0 {
-				cases[userIndex] = userCase // start receiving from user again
-			}
-			sending = false
-		case errorIndex:
+			s.credit-- // timing issues with credits?
+			return
+		case cred := <-s.credits:
+			s.credit += cred
+		case <-s.mn.ErrorSignal():
+			s.quit = true
 			return
 		}
 	}
 }
 
-type sendEntry struct {
-	name     hashedName
-	present  bool
-	ch       reflect.Value
-	toSender chan<- int // credits from the credRouter
-	padding  int
+func (s sender) run() {
+	recvSomething := [3]reflect.SelectCase{
+		{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(s.credits)},
+		{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(s.mn.ErrorSignal())},
+		{Dir: reflect.SelectRecv, Chan: s.ch},
+	}
+	const (
+		recvCredit int = iota
+		recvError
+		recvData
+	)
+	for !s.quit {
+		var numCases int
+		if s.credit > 0 {
+			numCases = 3
+		} else {
+			// Do not receive from user channel (3rd case).
+			numCases = 2
+		}
+		i, val, ok := reflect.Select(recvSomething[0:numCases])
+		switch i {
+		case recvCredit:
+			s.credit += val.Interface().(int)
+		case recvError:
+			return
+		case recvData:
+			s.sendToEncoder(val, ok)
+		}
+	}
 }
 
 type credRouter struct {
-	creditCh   <-chan credit // from decoder
-	openReqCh  <-chan openReq
-	openRespCh chan<- error
-	mn         *Manager
+	credits   <-chan credit // from decoder
+	openReqs  <-chan openReq
+	openResps chan<- error
+	mn        *Manager
 
-	table, pending []sendEntry
+	table *chanTable
 }
 
 // Open a net-chan for sending.
@@ -82,29 +89,30 @@ type credRouter struct {
 //     In this case, open adds the entry to the pending table (we don't know the channel
 //     id yet), with 0 credit. When the message arrives, we patch the entry with the
 //     credit and move it from the pending table to the final table.
-func (r *credRouter) open(name string, userCh reflect.Value) error {
+func (r *credRouter) open(name string, ch reflect.Value) error {
 	hName := hashName(name)
-	entry, id := entryByName(r.table, hName)
-	if entry != nil {
+	id := indexOf(r.table, hName)
+	if id != -1 {
 		// Initial credit already arrived.
+		entry := &r.table[i]
 		if entry.ch != nil {
 			return errAlreadyOpen(name, "Send")
 		}
-		entry.userCh = userCh
-		creditCh = make(chan int)
-		entry.toSender = creditCh
-		go sender(id, r.mn, userCh, creditCh, r.toEncoder)
+		entry.ch = ch
+		credits = make(chan int)
+		entry.toSender = credits
+		go sender{id, ch, credits, r.mn.toEncoder, false, r.mn}.run()
 		return nil
 	}
 	// Initial credit did not arrive yet.
-	pend, _ := entryByName(r.pending, hName)
-	if pend != nil {
+	id = indexOf(r.pending, hName)
+	if id != -1 {
 		return errAlreadyOpen(name, "Send")
 	}
-	r.pending = addEntry(r.pending, sendEntry{
+	r.pending = addEntry(r.pending, chanEntry{
 		name:    hName,
 		present: true,
-		userCh:  userCh,
+		ch:      ch,
 	})
 	return nil
 }
@@ -112,9 +120,9 @@ func (r *credRouter) open(name string, userCh reflect.Value) error {
 func (r *credRouter) run() {
 	for {
 		select {
-		case req := <-r.openReqCh:
-			r.openRespCh <- r.open(req.name, req.ch)
-		case cred, ok := <-r.creditCh:
+		case req := <-r.openReqs:
+			r.openResps <- r.open(req.name, req.ch)
+		case cred, ok := <-r.credits:
 			if !ok {
 				// An error occurred and decoder shut down.
 				return
@@ -184,7 +192,7 @@ func sanityCheck(table []chanEntry) (manyHoles, manyHalfOpen bool) {
 
 // An initial credit arrived.
 func (r *credRouter) handleInitCred(cred credit) error {
-	entry := entryByName(r.table, *cred.name)
+	entry, _ := entryByName(r.table, *cred.name)
 	if entry != nil {
 		return newErr("initial credit arrived for already open net-chan")
 	}

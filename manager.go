@@ -199,8 +199,7 @@ func (m *Manager) OpenSend(name string, channel interface{}) error {
 	if ch.Type().ChanDir()&reflect.RecvDir == 0 {
 		return newErr("OpenSend requires a <-chan")
 	}
-	m.credRouter.openReqCh <- openReq{name, ch, 0}
-	return <-m.credRouter.openRespCh
+	return m.credRouter.open(name, ch)
 }
 
 func (m *Manager) OpenRecv(name string, channel interface{}, bufferCap int) error {
@@ -214,8 +213,7 @@ func (m *Manager) OpenRecv(name string, channel interface{}, bufferCap int) erro
 	if bufferCap <= 0 {
 		return newErr("OpenRecv bufferCap must be at least 1")
 	}
-	m.elemRouter.openReqCh <- openReq{name, ch, bufferCap}
-	return <-m.elemRouter.openRespCh
+	return m.elemRouter.open(name, ch, bufferCap)
 }
 
 // Error returns the first error that occurred on this manager. If no error
