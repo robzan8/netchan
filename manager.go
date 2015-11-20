@@ -166,6 +166,12 @@ func ManageLimit(conn io.ReadWriteCloser, msgSizeLimit int) *Manager {
 	return mn
 }
 
+type openReq struct {
+	name    string
+	ch      reflect.Value
+	recvCap int
+}
+
 // Open method opens a net-chan with the given name and direction on the connection
 // handled by the manager. The channel argument must be a channel and will be used for
 // receiving or sending data on this net-chan.
@@ -193,25 +199,23 @@ func (m *Manager) OpenSend(name string, channel interface{}) error {
 	if ch.Type().ChanDir()&reflect.RecvDir == 0 {
 		return newErr("OpenSend requires a <-chan")
 	}
-	return m.send.open(name, ch)
+	m.credRouter.openReqCh <- openReq{name, ch, 0}
+	return <-m.credRouter.openRespCh
 }
 
 func (m *Manager) OpenRecv(name string, channel interface{}, bufferCap int) error {
 	ch := reflect.ValueOf(channel)
 	if ch.Kind() != reflect.Chan {
-		return newErr("OpenRecv channel arg is not a channel")
+		return newErr("OpenRecv channel is not a channel")
 	}
 	if ch.Type().ChanDir()&reflect.SendDir == 0 {
 		return newErr("OpenRecv requires a chan<-")
 	}
-	if ch.Cap() == 0 {
-		return newErr("Open: Recv dir requires a buffered channel")
+	if bufferCap <= 0 {
+		return newErr("OpenRecv bufferCap must be at least 1")
 	}
-	if ch.Len() != 0 {
-		return newErr("Open: Recv dir requires an empty, dedicated channel (i.e. " +
-			"len(channel) == 0 and the channel should be used for receiving only")
-	}
-	return m.recv.open(name, ch)
+	m.elemRouter.openReqCh <- openReq{name, ch, bufferCap}
+	return <-m.elemRouter.openRespCh
 }
 
 // Error returns the first error that occurred on this manager. If no error
