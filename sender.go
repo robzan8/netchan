@@ -1,6 +1,34 @@
 package netchan
 
-import "reflect"
+import (
+	"reflect"
+	"sync"
+)
+
+type sendEntry struct {
+	name     hashedName
+	present  bool
+	halfOpen bool
+	initCred *credit
+	toSender chan<- int
+	quit     <-chan struct{}
+}
+
+type sendTable struct {
+	sync.Mutex
+	t       []sendEntry
+	pending map[hashedName]reflect.Value
+}
+
+func entryByName(table []sendEntry, name hashedName) *sendEntry {
+	for i := range table {
+		entry = &table[i]
+		if entry.present && entry.name == name {
+			return entry
+		}
+	}
+	return nil
+}
 
 type sender struct {
 	id          int
@@ -9,7 +37,7 @@ type sender struct {
 	errorSignal <-chan struct{}
 	toEncoder   chan<- element
 	quitChan    chan<- struct{}
-	table       *nchTable // table of the credit router
+	table       *sendTable // table of the credit router
 	credit      int
 	quit        bool
 }
@@ -41,7 +69,6 @@ func (s *sender) sendToEncoder(val reflect.Value, ok bool) {
 }
 
 // TODO: send initElemMsg?
-// sender passed by value!
 func (s sender) run() {
 	recvSomething := [3]reflect.SelectCase{
 		{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(s.credits)},
@@ -76,31 +103,20 @@ func (s sender) run() {
 
 type credRouter struct {
 	credits <-chan credit // from decoder
-	table   *chanTable
+	table   sendTable
 	mn      *Manager
 }
 
-func (r *credRouter) newEntry(name hashedName, id int,
-	ch reflect.Value, credit int, halfOpen bool) (e nchEntry) {
-
+func (r *credRouter) startSender(entry *sendEntry, ch reflect.Value) {
 	quit := make(chan struct{})
 	credits := make(chan int)
 
-	e.name = name
-	e.present = true
-	e.halfOpen = halfOpen
-	e.quit = quit
-	e.toSender = credits
-	e.sender = &sender{
-		id:          id,
-		ch:          ch,
-		credits:     credits,
-		errorSignal: r.mn.ErrorSignal(),
-		toEncoder:   r.mn.toEncoder,
-		quitChan:    quit,
-		table:       r.table,
-		credit:      credit,
-	}
+	go sender{entry.initCred.id, ch, credits, r.mn.ErrorSignal(),
+		r.mn.toEncoder, quit, &r.table, entry.initCred.incr, false}.run()
+
+	entry.quit = quit
+	entry.toSender = credits
+	entry.initCred = nil
 	return
 }
 
@@ -127,18 +143,16 @@ func (r *credRouter) open(name string, ch reflect.Value) error {
 		if !entry.halfOpen {
 			return errAlreadyOpen(name, "Send")
 		}
-		entry.sender.ch = ch
+		r.startSender(entry, ch)
 		entry.halfOpen = false
-		go entry.sender.run() // makes a copy of sender
-		entry.sender = nil
 		return nil
 	}
 	// Initial credit did not arrive yet.
-	entry = entryByName(r.table.pending, hName)
-	if entry != nil {
+	_, present := r.table.pending[hName]
+	if present {
 		return errAlreadyOpen(name, "Send")
 	}
-	r.table.pending, _ = addEntry(r.table.pending, r.newEntry(hName, -1, ch, 0, false))
+	r.table.pending[hName] = ch
 	return nil
 }
 
@@ -226,21 +240,19 @@ func (r *credRouter) handleInitCred(cred credit) error {
 	default:
 		return errInvalidId
 	}
-	entry = &r.table.t[cred.id]
-	pend := entryByName(r.table.pending, *cred.name)
-	if pend != nil {
+	ch, present := r.table.pending[*cred.name]
+	r.table.t[cred.id] = sendEntry{
+		name:     *cred.name,
+		present:  true,
+		halfOpen: !present,
+		initCred: &cred,
+	}
+	if present {
 		// User already called Open(Send).
-		*entry = *pend
-		*pend = nchEntry{}
-
-		entry.sender.id = cred.id
-		entry.sender.credit = cred.incr
-		go entry.sender.run() // makes a copy of sender
-		entry.sender = nil
+		r.startSender(&r.table.t[cred.id], ch)
+		delete(r.table.pending, *cred.name)
 		return
 	}
-	// User did not call Open(Send) yet.
-	*entry = r.newEntry(*cred.name, cred.id, reflect.Value{}, cred.incr, true)
 }
 
 func (r *credRouter) run() {
@@ -257,7 +269,7 @@ func (r *credRouter) run() {
 			err = r.handleInitCred(cred)
 		}
 		if err != nil {
-			r.mn.ShutDownWith(err)
+			go r.mn.ShutDownWith(err)
 			return
 		}
 	}

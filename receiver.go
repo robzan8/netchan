@@ -23,13 +23,10 @@ type receiver struct {
 	errorSignal <-chan struct{}
 	ch          reflect.Value
 	toEncoder   chan<- credit
-	table       *recvTable // table of the element router
 	bufCap      int
 	received    int
 	quit        bool
 }
-
-// can we deadlock somehow?
 
 func (r *receiver) sendToUser(val reflect.Value) {
 	sendAndError := [2]reflect.SelectCase{
@@ -50,7 +47,6 @@ func (r *receiver) sendToEncoder(cred credit) {
 	}
 }
 
-// makes a copy
 func (r receiver) run() {
 	r.sendToEncoder(credit{r.id, r.bufCap, &r.name}) // initial credit
 	for !r.quit {
@@ -60,12 +56,12 @@ func (r receiver) run() {
 				r.ch.Close()
 				return
 			}
-			r.sendToUser(val)
 			r.received++
 			if r.received*2 >= r.bufCap { // i.e. received >= ceil(bufCap/2)
 				r.sendToEncoder(credit{r.id, r.received, nil})
 				r.received = 0
 			}
+			r.sendToUser(val)
 		case <-r.errorSignal:
 			return
 		}
@@ -99,10 +95,9 @@ func (r *elemRouter) open(name string, ch reflect.Value, bufCap int) error {
 
 	buffer := make(chan reflect.Value, bufCap)
 	r.table.t[id] = recvEntry{hName, true, buffer}
-	go receiver{
-		id, hName, buffer, r.mn.ErrorSignal(), ch,
-		r.mn.toEncoder, &r.table, bufCap, 0, false,
-	}.run()
+
+	go receiver{id, hName, buffer, r.mn.ErrorSignal(),
+		ch, r.mn.toEncoder, bufCap, 0, false}.run()
 	return nil
 }
 
@@ -144,7 +139,7 @@ func (r *elemRouter) run() {
 		}
 		err := r.handleElem(elem)
 		if err != nil {
-			r.mn.ShutDownWith(err)
+			go r.mn.ShutDownWith(err)
 		}
 	}
 }

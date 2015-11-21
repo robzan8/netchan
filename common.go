@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"reflect"
 	"strconv"
-	"sync"
 )
 
 // sha1-hashed name of a net-chan
@@ -31,37 +30,6 @@ type credit struct {
 	id   int         // ID of the net-chan
 	incr int         // amount of credit
 	name *hashedName // if not nil, this is an initCredMsg
-}
-
-// The sender component of a manager keeps a table of all the
-// net-chans opened for sending and likewise does the receiver.
-type nchTable struct {
-	sync.Mutex            // protects remaining fields
-	t          []nchEntry // the table
-	pending    []nchEntry // only the sender uses this, see sender.go
-}
-
-// An entry in a nchTable. Keep it 64 bytes on x64 if possible.
-type nchEntry struct {
-	name    hashedName
-	present bool
-
-	sender   *sender
-	halfOpen bool
-	toSender chan<- int
-	quit     <-chan struct{}
-
-	buffer chan<- reflect.Value
-}
-
-func entryByName(table []nchEntry, name hashedName) *nchEntry {
-	for i := range table {
-		entry = &table[i]
-		if entry.present && entry.name == name {
-			return entry
-		}
-	}
-	return nil
 }
 
 func addEntry(table []nchEntry, entry nchEntry) (newTable []nchEntry, i int) {

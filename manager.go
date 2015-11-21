@@ -5,11 +5,8 @@ package netchan
 - fuzzy testing
 
 performance:
-- errorsignal scales? is it inlined?
-
+- errorsignal scales? is it inlined? use pool of randoms?
 - profile time and memory
-- more sophisticated sender's select
-- more sophisticated credit sender
 - adjust ShutDown timeout
 */
 
