@@ -129,25 +129,25 @@ func ManageLimit(conn io.ReadWriteCloser, msgSizeLimit int) *Manager {
 
 	const chCap int = 0
 	recvElemCh := make(chan element, chCap)
-	sendCredCh := make(chan credit, chCap)
-	*mn.elemRtr = elemRouter{elements: recvElemCh, toEncoder: sendCredCh, mn: mn}
-
 	recvCredCh := make(chan credit, chCap)
 	sendElemCh := make(chan element, chCap)
-	*mn.credRtr = credReceiver{credits: recvCredCh, toEncoder: sendElemCh, mn: mn}
-	mn.credRtr.table.pending = make(map[hashedName]reflect.Value)
+	sendCredCh := make(chan credit, chCap)
 
 	enc := &encoder{elemCh: sendElemCh, creditCh: sendCredCh, mn: mn}
 	enc.enc = gob.NewEncoder(conn)
 	dec := &decoder{
 		toReceiver:   recvElemCh,
 		toCredRecv:   recvCredCh,
-		table:        &mn.elemRtr.table,
 		mn:           mn,
 		msgSizeLimit: msgSizeLimit,
 		limReader:    limitedReader{R: conn},
 	}
 	dec.dec = gob.NewDecoder(&dec.limReader)
+
+	*mn.elemRtr = elemRouter{elements: recvElemCh,
+		toEncoder: sendCredCh, types: &dec.types, mn: mn}
+	*mn.credRtr = credRouter{credits: recvCredCh, toEncoder: sendElemCh, mn: mn,
+		table: sendTable{pending: make(map[hashedName]reflect.Value)}}
 
 	go mn.elemRtr.run()
 	go mn.credRtr.run()
@@ -183,7 +183,7 @@ func (m *Manager) OpenSend(name string, channel interface{}) error {
 	if ch.Type().ChanDir()&reflect.RecvDir == 0 {
 		return newErr("OpenSend requires a <-chan")
 	}
-	return m.credRouter.open(name, ch)
+	return m.credRtr.open(name, ch)
 }
 
 func (m *Manager) OpenRecv(name string, channel interface{}, bufferCap int) error {
@@ -197,7 +197,7 @@ func (m *Manager) OpenRecv(name string, channel interface{}, bufferCap int) erro
 	if bufferCap <= 0 {
 		return newErr("OpenRecv bufferCap must be at least 1")
 	}
-	return m.elemRouter.open(name, ch, bufferCap)
+	return m.elemRtr.open(name, ch, bufferCap)
 }
 
 // Error returns the first error that occurred on this manager. If no error

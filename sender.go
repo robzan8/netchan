@@ -22,7 +22,7 @@ type sendTable struct {
 
 func entryByName(table []sendEntry, name hashedName) *sendEntry {
 	for i := range table {
-		entry = &table[i]
+		entry := &table[i]
 		if entry.present && entry.name == name {
 			return entry
 		}
@@ -52,7 +52,7 @@ func (s *sender) sendToEncoder(val reflect.Value, ok bool) {
 			if !ok {
 				// net-chan has been closed
 				s.table.Lock()
-				s.table[s.id] = sendEntry{}
+				s.table.t[s.id] = sendEntry{}
 				s.table.Unlock()
 				s.quit = true
 				return
@@ -160,7 +160,7 @@ func (r *credRouter) open(name string, ch reflect.Value) error {
 // Got a credit from the decoder.
 func (r *credRouter) handleCred(cred credit) error {
 	r.table.Lock()
-	if cred.id >= len(r.table) {
+	if cred.id >= len(r.table.t) {
 		r.table.Unlock()
 		return errInvalidId
 	}
@@ -255,8 +255,8 @@ func (r *credRouter) handleInitCred(cred credit) error {
 		// User already called Open(Send).
 		r.startSender(&r.table.t[cred.id], ch)
 		delete(r.table.pending, *cred.name)
-		return
 	}
+	return nil
 }
 
 func (r *credRouter) run() {

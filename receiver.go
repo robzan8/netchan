@@ -6,10 +6,9 @@ import (
 )
 
 type recvEntry struct {
-	name     hashedName
-	present  bool
-	buffer   chan<- reflect.Value
-	elemType reflect.Type
+	name    hashedName
+	present bool
+	buffer  chan<- reflect.Value
 }
 
 type recvTable struct {
@@ -31,8 +30,8 @@ type receiver struct {
 
 func (r *receiver) sendToUser(val reflect.Value) {
 	sendAndError := [2]reflect.SelectCase{
-		{Dir: reflect.SelectSend, Chan: ch, Send: val},
-		{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(s.errorSignal)},
+		{Dir: reflect.SelectSend, Chan: r.ch, Send: val},
+		{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(r.errorSignal)},
 	}
 	i, _, _ := reflect.Select(sendAndError[:])
 	if i == 1 { // errorSignal
@@ -73,6 +72,7 @@ type elemRouter struct {
 	elements  <-chan element // from decoder
 	toEncoder chan<- credit
 	table     recvTable
+	types     *typeTable // decoder's
 	mn        *Manager
 }
 
@@ -83,7 +83,7 @@ func (r *elemRouter) open(name string, ch reflect.Value, bufCap int) error {
 
 	hName := hashName(name)
 	id := len(r.table.t)
-	for i, entry := range table {
+	for i, entry := range r.table.t {
 		if entry.present && entry.name == hName {
 			return errAlreadyOpen("Recv", name)
 		}
@@ -91,12 +91,17 @@ func (r *elemRouter) open(name string, ch reflect.Value, bufCap int) error {
 			id = i
 		}
 	}
+
+	r.types.Lock()
+	defer r.types.Unlock()
+
 	if id == len(r.table.t) {
 		r.table.t = append(r.table.t, recvEntry{})
+		r.types.t = append(r.types.t, nil)
 	}
-
 	buffer := make(chan reflect.Value, bufCap)
-	r.table.t[id] = recvEntry{hName, true, buffer, ch.Type().Elem()}
+	r.table.t[id] = recvEntry{hName, true, buffer}
+	r.types.t[id] = ch.Type().Elem()
 
 	go receiver{id, hName, buffer, r.mn.ErrorSignal(),
 		ch, r.toEncoder, bufCap, 0, false}.run()
@@ -107,6 +112,7 @@ func (r *elemRouter) open(name string, ch reflect.Value, bufCap int) error {
 // WARNING: we are not handling initElemMsg
 func (r *elemRouter) handleElem(elem element) error {
 	r.table.Lock()
+	// these checks done already by decoder?
 	if elem.id >= len(r.table.t) {
 		r.table.Unlock()
 		return errInvalidId
@@ -119,9 +125,13 @@ func (r *elemRouter) handleElem(elem element) error {
 	buffer := entry.buffer
 	if !elem.ok {
 		// net-chan closed, delete the entry.
+		r.types.Lock()
 		*entry = recvEntry{}
+		r.types.t[elem.id] = nil
+		r.types.Unlock()
+
 		r.table.Unlock()
-		buffer.Close()
+		close(buffer)
 		return nil
 	}
 	r.table.Unlock()
@@ -137,7 +147,7 @@ func (r *elemRouter) handleElem(elem element) error {
 
 func (r *elemRouter) run() {
 	for {
-		elem, ok := <-r.elemCh
+		elem, ok := <-r.elements
 		if !ok {
 			// An error occurred and decoder shut down.
 			return

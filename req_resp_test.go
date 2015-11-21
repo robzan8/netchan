@@ -27,14 +27,14 @@ func client(conn io.ReadWriteCloser) {
 	go checkErrors(mn)
 
 	reqCh := make(chan request, 1)
-	err := mn.Open("requests", netchan.Send, reqCh)
+	err := mn.OpenSend("requests", reqCh)
 	if err != nil {
 		log.Fatal(err)
 	}
 	reqCh <- request{10, "response chan 0"}
 
-	respCh := make(chan int, 5)
-	err = mn.Open("response chan 0", netchan.Recv, respCh)
+	respCh := make(chan int, 1)
+	err = mn.OpenRecv("response chan 0", respCh, 5)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -50,15 +50,15 @@ func server(conn io.ReadWriteCloser) {
 	mn := netchan.Manage(conn)
 	go checkErrors(mn)
 
-	reqCh := make(chan request, 5)
-	err := mn.Open("requests", netchan.Recv, reqCh)
+	reqCh := make(chan request, 1)
+	err := mn.OpenRecv("requests", reqCh, 5)
 	if err != nil {
 		log.Fatal(err)
 	}
 	req := <-reqCh
 
 	respCh := make(chan int, 1)
-	err = mn.Open(req.RespChName, netchan.Send, respCh)
+	err = mn.OpenSend(req.RespChName, respCh)
 	if err != nil {
 		log.Fatal(err)
 	}

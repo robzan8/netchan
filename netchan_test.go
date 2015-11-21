@@ -27,18 +27,18 @@ func newPipeConn() (sideA, sideB pipeConn) {
 }
 
 // intProducer sends integers from 0 to n-1 on net-chan chName
-func intProducer(t *testing.T, man *Manager, chName string, n int) {
+func intProducer(t *testing.T, mn *Manager, chName string, n int) {
 	go func() {
 		ch := make(chan int, 8)
-		err := man.Open(chName, Send, ch)
+		err := mn.OpenSend(chName, ch)
 		if err != nil {
 			t.Error(err)
 		}
 		for i := 0; i < n; i++ {
 			select {
 			case ch <- i:
-			case <-man.ErrorSignal():
-				t.Error(man.Error())
+			case <-mn.ErrorSignal():
+				t.Error(mn.Error())
 			}
 		}
 		close(ch)
@@ -47,12 +47,12 @@ func intProducer(t *testing.T, man *Manager, chName string, n int) {
 
 // intConsumer drains net-chan chName, stores the received integers in a slice
 // and delivers the slice on a channel, which is returned
-func intConsumer(t *testing.T, man *Manager, chName string) <-chan []int {
+func intConsumer(t *testing.T, mn *Manager, chName string) <-chan []int {
 	sliceCh := make(chan []int, 1)
 	go func() {
 		var slice []int
-		ch := make(chan int, 16)
-		err := man.Open(chName, Recv, ch)
+		ch := make(chan int, 8)
+		err := mn.OpenRecv(chName, ch, 8)
 		if err != nil {
 			t.Error(err)
 		}
@@ -64,8 +64,8 @@ func intConsumer(t *testing.T, man *Manager, chName string) <-chan []int {
 					break Loop
 				}
 				slice = append(slice, i)
-			case <-man.ErrorSignal():
-				t.Error(man.Error())
+			case <-mn.ErrorSignal():
+				t.Error(mn.Error())
 			}
 		}
 		sliceCh <- slice
@@ -150,7 +150,7 @@ const (
 func sliceProducer(t *testing.T, conn io.ReadWriteCloser) {
 	mn := Manage(conn)
 	ch := make(chan []byte, 1)
-	err := mn.Open("slices", Send, ch)
+	err := mn.OpenSend("slices", ch)
 	if err != nil {
 		t.Error(err)
 	}
@@ -177,8 +177,8 @@ func sliceConsumer(t *testing.T, conn io.ReadWriteCloser) {
 	mn := ManageLimit(conn, limit)
 	// use a receive channel with capacity 1, so that items come
 	// one at a time and we get the error for the last one only
-	ch := make(chan []byte, 1)
-	err := mn.Open("slices", Recv, ch)
+	ch := make(chan []byte)
+	err := mn.OpenRecv("slices", ch, 1)
 	if err != nil {
 		t.Error(err)
 	}

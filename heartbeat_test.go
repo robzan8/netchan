@@ -78,15 +78,15 @@ func heartbeatPeer(conn io.ReadWriteCloser) {
 	mn := netchan.Manage(conn)
 	// the same manager is used to open both channels.
 	// On each end, a connection must have only one manager
-	recv := make(chan struct{}, 4)
-	err := mn.Open("heartbeat", netchan.Recv, recv)
+	recv := make(chan struct{})
+	err := mn.OpenRecv("heartbeat", recv, 4)
 	if err != nil {
 		log.Fatal(err)
 	}
 	go recvHeartbeat(recv, mn)
 
 	send := make(chan struct{}, 4)
-	err = mn.Open("heartbeat", netchan.Send, send)
+	err = mn.OpenSend("heartbeat", send)
 	if err != nil {
 		log.Fatal(err)
 	}

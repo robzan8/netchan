@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"reflect"
+	"sync"
 )
 
 // review shutdown procedure
@@ -105,11 +106,11 @@ func (e *encoder) run() {
 				e.creditCh = nil
 			case cred.name != nil:
 				e.encode(header{initCredMsg, cred.id})
-				e.encode(cred.incr)
+				e.encode(cred.amount)
 				e.encode(cred.name)
 			default:
 				e.encode(header{creditMsg, cred.id})
-				e.encode(cred.incr)
+				e.encode(cred.amount)
 			}
 		}
 	}
@@ -145,10 +146,15 @@ func (l *limitedReader) Read(p []byte) (n int, err error) {
 	return
 }
 
+type typeTable struct {
+	sync.Mutex
+	t []reflect.Type
+}
+
 type decoder struct {
 	toReceiver   chan<- element
 	toCredRecv   chan<- credit
-	table        *recvTable // same table of elemRouter, needed for type information
+	types        typeTable // updated by elemRouter
 	mn           *Manager
 	msgSizeLimit int
 	limReader    limitedReader
@@ -194,13 +200,13 @@ func (d *decoder) run() (err error) {
 		switch h.MsgType {
 		case elemMsg:
 			elem := element{id: h.ChanID, ok: true}
-			d.table.RLock()
-			if elem.id >= len(d.table.t) || !d.table.t[elem.id].present {
-				d.table.RUnlock()
+			d.types.Lock()
+			if elem.id >= len(d.types.t) || d.types.t[elem.id] == nil {
+				d.types.Unlock()
 				return errInvalidId
 			}
-			elemType := d.table.t[elem.id].elemType
-			d.table.RUnlock()
+			elemType := d.types.t[elem.id]
+			d.types.Unlock()
 			elem.val = reflect.New(elemType).Elem()
 			err = d.decodeVal(elem.val)
 			if err != nil {
@@ -221,11 +227,11 @@ func (d *decoder) run() (err error) {
 
 		case creditMsg, initCredMsg:
 			cred := credit{id: h.ChanID}
-			err = d.decode(&cred.incr)
+			err = d.decode(&cred.amount)
 			if err != nil {
 				return
 			}
-			if cred.incr <= 0 {
+			if cred.amount <= 0 {
 				return newErr("credit with non-positive value received")
 			}
 			if h.MsgType == initCredMsg {
