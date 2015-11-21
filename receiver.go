@@ -6,9 +6,10 @@ import (
 )
 
 type recvEntry struct {
-	name    hashedName
-	present bool
-	buffer  chan<- reflect.Value
+	name     hashedName
+	present  bool
+	buffer   chan<- reflect.Value
+	elemType reflect.Type
 }
 
 type recvTable struct {
@@ -69,9 +70,10 @@ func (r receiver) run() {
 }
 
 type elemRouter struct {
-	elements <-chan element // from decoder
-	table    recvTable
-	mn       *Manager
+	elements  <-chan element // from decoder
+	toEncoder chan<- credit
+	table     recvTable
+	mn        *Manager
 }
 
 // Open a net-chan for receiving.
@@ -83,7 +85,7 @@ func (r *elemRouter) open(name string, ch reflect.Value, bufCap int) error {
 	id := len(r.table.t)
 	for i, entry := range table {
 		if entry.present && entry.name == hName {
-			return errAlreadyOpen(name, "Recv")
+			return errAlreadyOpen("Recv", name)
 		}
 		if !entry.present && i < id {
 			id = i
@@ -94,10 +96,10 @@ func (r *elemRouter) open(name string, ch reflect.Value, bufCap int) error {
 	}
 
 	buffer := make(chan reflect.Value, bufCap)
-	r.table.t[id] = recvEntry{hName, true, buffer}
+	r.table.t[id] = recvEntry{hName, true, buffer, ch.Type().Elem()}
 
 	go receiver{id, hName, buffer, r.mn.ErrorSignal(),
-		ch, r.mn.toEncoder, bufCap, 0, false}.run()
+		ch, r.toEncoder, bufCap, 0, false}.run()
 	return nil
 }
 

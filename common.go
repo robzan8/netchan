@@ -32,19 +32,6 @@ type credit struct {
 	name   *hashedName // if not nil, this is an initCredMsg
 }
 
-func addEntry(table []nchEntry, entry nchEntry) (newTable []nchEntry, i int) {
-	for i = range table {
-		if !table[i].present {
-			// reuse empty slot
-			table[i] = entry
-			return table, i
-		}
-	}
-	i = len(table)
-	newTable = append(table, entry)
-	return
-}
-
 func newErr(str string) error {
 	return errors.New("netchan: " + str)
 }
@@ -55,7 +42,6 @@ func fmtErr(format string, a ...interface{}) error {
 	return fmt.Errorf("netchan: "+format, a...)
 }
 
-func errAlreadyOpen(name string, dir Dir) error {
-	return fmtErr("Open: net-chan %s is already open with dir %s",
-		strconv.Quote(name), dir)
+func errAlreadyOpen(dir, name string) error {
+	return fmtErr("Open%s: net-chan %s is already open", dir, strconv.Quote(name))
 }

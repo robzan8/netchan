@@ -102,9 +102,10 @@ func (s sender) run() {
 }
 
 type credRouter struct {
-	credits <-chan credit // from decoder
-	table   sendTable
-	mn      *Manager
+	credits   <-chan credit // from decoder
+	toEncoder chan<- element
+	table     sendTable
+	mn        *Manager
 }
 
 func (r *credRouter) startSender(entry *sendEntry, ch reflect.Value) {
@@ -112,7 +113,7 @@ func (r *credRouter) startSender(entry *sendEntry, ch reflect.Value) {
 	credits := make(chan int)
 
 	go sender{entry.initCred.id, ch, credits, r.mn.ErrorSignal(),
-		r.mn.toEncoder, quit, &r.table, entry.initCred.amount, false}.run()
+		r.toEncoder, quit, &r.table, entry.initCred.amount, false}.run()
 
 	entry.quit = quit
 	entry.toSender = credits
@@ -141,7 +142,7 @@ func (r *credRouter) open(name string, ch reflect.Value) error {
 	if entry != nil {
 		// Initial credit already arrived.
 		if !entry.halfOpen {
-			return errAlreadyOpen(name, "Send")
+			return errAlreadyOpen("Send", name)
 		}
 		r.startSender(entry, ch)
 		entry.halfOpen = false
@@ -150,7 +151,7 @@ func (r *credRouter) open(name string, ch reflect.Value) error {
 	// Initial credit did not arrive yet.
 	_, present := r.table.pending[hName]
 	if present {
-		return errAlreadyOpen(name, "Send")
+		return errAlreadyOpen("Send", name)
 	}
 	r.table.pending[hName] = ch
 	return nil

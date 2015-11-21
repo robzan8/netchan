@@ -52,9 +52,9 @@ func (o *once) Do(f func()) {
 // A Manager handles the message traffic of its connection, implementing the netchan
 // protocol.
 type Manager struct {
-	conn io.ReadWriteCloser
-	send *sender
-	recv *receiver
+	conn    io.ReadWriteCloser
+	elemRtr *elemRouter
+	credRtr *credRouter
 
 	errOnce, closeOnce once
 	err, closeErr      error
@@ -123,51 +123,37 @@ func ManageLimit(conn io.ReadWriteCloser, msgSizeLimit int) *Manager {
 	}
 
 	// create all the components, connect them with channels and fire up the goroutines.
-	send := new(sender)
-	recv := new(receiver)
-	mn := &Manager{conn: conn, send: send, recv: recv}
+	mn := &Manager{conn: conn, elemRtr: new(elemRouter), credRtr: new(credRouter)}
 	mn.errOnce.done = make(chan struct{})
 	mn.closeOnce.done = make(chan struct{})
 
-	const chCap int = 8
-	sendElemCh := make(chan element, chCap)
-	recvCredCh := make(chan credit, chCap)
-	sendTab := new(chanTable)
-	*send = sender{toEncoder: sendElemCh, table: sendTab, mn: mn}
-	send.init()
-	credRecv := &credReceiver{creditCh: recvCredCh, table: sendTab, mn: mn}
-
+	const chCap int = 0
 	recvElemCh := make(chan element, chCap)
 	sendCredCh := make(chan credit, chCap)
-	recvTab := new(chanTable)
-	*recv = receiver{elemCh: recvElemCh, table: recvTab, mn: mn}
-	credSend := &credSender{toEncoder: sendCredCh, table: recvTab, mn: mn}
+	*mn.elemRtr = elemRouter{elements: recvElemCh, toEncoder: sendCredCh, mn: mn}
+
+	recvCredCh := make(chan credit, chCap)
+	sendElemCh := make(chan element, chCap)
+	*mn.credRtr = credReceiver{credits: recvCredCh, toEncoder: sendElemCh, mn: mn}
+	mn.credRtr.table.pending = make(map[hashedName]reflect.Value)
 
 	enc := &encoder{elemCh: sendElemCh, creditCh: sendCredCh, mn: mn}
 	enc.enc = gob.NewEncoder(conn)
 	dec := &decoder{
 		toReceiver:   recvElemCh,
 		toCredRecv:   recvCredCh,
-		table:        recvTab,
+		table:        &mn.elemRtr.table,
 		mn:           mn,
 		msgSizeLimit: msgSizeLimit,
 		limReader:    limitedReader{R: conn},
 	}
 	dec.dec = gob.NewDecoder(&dec.limReader)
 
-	go send.run()
-	go recv.run()
-	go credRecv.run()
-	go credSend.run()
+	go mn.elemRtr.run()
+	go mn.credRtr.run()
 	go enc.run()
 	go dec.run()
 	return mn
-}
-
-type openReq struct {
-	name    string
-	ch      reflect.Value
-	recvCap int
 }
 
 // Open method opens a net-chan with the given name and direction on the connection
@@ -192,7 +178,7 @@ type openReq struct {
 func (m *Manager) OpenSend(name string, channel interface{}) error {
 	ch := reflect.ValueOf(channel)
 	if ch.Kind() != reflect.Chan {
-		return newErr("OpenSend channel arg is not a channel")
+		return newErr("OpenSend: channel arg is not a channel")
 	}
 	if ch.Type().ChanDir()&reflect.RecvDir == 0 {
 		return newErr("OpenSend requires a <-chan")
