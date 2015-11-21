@@ -2,79 +2,140 @@ package netchan
 
 import (
 	"reflect"
-	"sync/atomic"
-	"time"
+	"sync"
 )
 
-// The receiver receives elements from the decoder and sends them to the user channels
-// that are registered in its table (see the graph in manager.go).
+type recvEntry struct {
+	name    hashedName
+	present bool
+	buffer  chan<- reflect.Value
+}
+
+type recvTable struct {
+	sync.Mutex
+	t []recvEntry
+}
+
 type receiver struct {
-	elemCh <-chan element
-	table  *chanTable
-	mn     *Manager
+	id          int
+	name        hashedName
+	buffer      <-chan reflect.Value
+	errorSignal <-chan struct{}
+	ch          reflect.Value
+	toEncoder   chan<- credit
+	table       *recvTable // table of the element router
+	bufCap      int
+	received    int
+	quit        bool
+}
+
+// can we deadlock somehow?
+
+func (r *receiver) sendToUser(val reflect.Value) {
+	sendAndError := [2]reflect.SelectCase{
+		{Dir: reflect.SelectSend, Chan: ch, Send: val},
+		{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(s.errorSignal)},
+	}
+	i, _, _ := reflect.Select(sendAndError[:])
+	if i == 1 { // errorSignal
+		r.quit = true
+	}
+}
+
+func (r *receiver) sendToEncoder(cred credit) {
+	select {
+	case r.toEncoder <- cred:
+	case <-r.errorSignal:
+		r.quit = true
+	}
+}
+
+// makes a copy
+func (r receiver) run() {
+	r.sendToEncoder(credit{r.id, r.bufCap, &r.name}) // initial credit
+	for !r.quit {
+		select {
+		case val, ok := <-r.buffer:
+			if !ok {
+				r.ch.Close()
+				return
+			}
+			r.sendToUser(val)
+			r.received++
+			if r.received*2 >= r.bufCap { // i.e. received >= ceil(bufCap/2)
+				r.sendToEncoder(credit{r.id, r.received, nil})
+				r.received = 0
+			}
+		case <-r.errorSignal:
+			return
+		}
+	}
+}
+
+type elemRouter struct {
+	elements <-chan element // from decoder
+	table    recvTable
+	mn       *Manager
 }
 
 // Open a net-chan for receiving.
-func (r *receiver) open(name string, ch reflect.Value) error {
+func (r *elemRouter) open(name string, ch reflect.Value, bufCap int) error {
 	r.table.Lock()
 	defer r.table.Unlock()
 
 	hName := hashName(name)
-	entry := entryByName(r.table.t, hName)
-	if entry != nil {
-		return errAlreadyOpen(name, Recv)
+	id := len(r.table.t)
+	for i, entry := range table {
+		if entry.present && entry.name == hName {
+			return errAlreadyOpen(name, "Recv")
+		}
+		if !entry.present {
+			id = i
+		}
 	}
-	// The position where the entry is added will determine the net-chan's id.
-	r.table.t = addEntry(r.table.t, chanEntry{
-		name:    hName,
-		present: true,
-		init:    true,
-		ch:      ch,
-		recvCap: int64(ch.Cap()),
-	})
+	if id == len(r.table.t) {
+		r.table.t = append(r.table.t, recvEntry{})
+	}
+
+	buffer := make(chan reflect.Value, bufCap)
+	r.table.t[id] = recvEntry{hName, true, buffer}
+	go receiver{
+		id, hName, buffer, r.mn.ErrorSignal(), ch,
+		r.mn.toEncoder, &r.table, bufCap, 0, false,
+	}.run()
 	return nil
 }
 
 // Got an element from the decoder.
-func (r *receiver) handleElem(elem element) error {
-	r.table.RLock()
+// WARNING: we are not handling initElemMsg
+func (r *elemRouter) handleElem(elem element) error {
+	r.table.Lock()
+	defer r.table.Unlock()
 
 	if elem.id >= len(r.table.t) {
-		r.table.RUnlock()
 		return errInvalidId
 	}
 	entry := &r.table.t[elem.id]
 	if !entry.present {
-		r.table.RUnlock()
-		return newErr("element arrived for deleted net-chan")
+		return newErr("element arrived for closed net-chan")
 	}
 	if !elem.ok {
 		// net-chan closed, delete the entry.
-		r.table.RUnlock()
-		// entry pointer can become invalid here.
-		r.table.Lock()
-		r.table.t[elem.id].ch.Close()
-		r.table.t[elem.id] = chanEntry{}
-		r.table.Unlock()
+		entry.buffer.Close()
+		*entry = chanEntry{}
 		return nil
 	}
-	if atomic.LoadInt64(entry.buffered()) >= entry.recvCap {
-		r.table.RUnlock()
+	buffer := entry.buffer
+	select {
+	case buffer <- elem.val:
+		return nil
+	default:
+		// Sending to the buffer should never be blocking.
 		return newErr("peer sent more than its credit allowed")
 	}
-	if int64(entry.ch.Len()) == entry.recvCap {
-		r.table.RUnlock()
-		return newErr("peer did not exceed its credit and yet the receive buffer" +
-			" is full; check the restrictions for Open(Recv) in the docs")
-	}
-	// Do not swap the next two lines.
-	entry.ch.Send(elem.val) // should not block
-	atomic.AddInt64(entry.buffered(), 1)
-	r.table.RUnlock()
-	return nil
 }
 
-func (r *receiver) run() {
+func (r *elemRouter) run() {
 	for {
 		elem, ok := <-r.elemCh
 		if !ok {
@@ -83,55 +144,7 @@ func (r *receiver) run() {
 		}
 		err := r.handleElem(elem)
 		if err != nil {
-			go r.mn.ShutDownWith(err)
+			r.mn.ShutDownWith(err)
 		}
 	}
-}
-
-// credSender monitors the receive channels and sends credits to the encoder.
-type credSender struct {
-	toEncoder chan<- credit
-	table     *chanTable // same table of the receiver
-	mn        *Manager
-
-	credits []credit
-}
-
-func (s *credSender) run() {
-	for s.mn.Error() == nil {
-		s.updateCredits()
-		for _, cred := range s.credits {
-			s.toEncoder <- cred
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	close(s.toEncoder)
-}
-
-func (s *credSender) updateCredits() {
-	s.table.RLock()
-
-	s.credits = s.credits[0:0]
-	for id := range s.table.t {
-		entry := &s.table.t[id]
-		if !entry.present {
-			continue
-		}
-		// Do not swap the next two lines.
-		buffered := atomic.LoadInt64(entry.buffered())
-		chLen := int64(entry.ch.Len())
-		consumed := buffered - chLen
-		if entry.init {
-			// Initial credit must be sent.
-			s.credits = append(s.credits, credit{id, entry.recvCap, &entry.name})
-			entry.init = false
-		} else if consumed*2 >= entry.recvCap { // i.e. consumed >= ceil(recvCap/2)
-			// Regular credit must be sent.
-			s.credits = append(s.credits, credit{id, consumed, nil})
-			// Forget about the messages the user consumed.
-			atomic.AddInt64(entry.buffered(), -consumed)
-		}
-		// TODO: when much time passes, send credit even if it's small.
-	}
-	s.table.RUnlock()
 }

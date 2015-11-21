@@ -29,42 +29,34 @@ type element struct {
 // creditMsg and initCredMsg.
 type credit struct {
 	id   int         // ID of the net-chan
-	incr int64       // amount of credit
+	incr int         // amount of credit
 	name *hashedName // if not nil, this is an initCredMsg
 }
 
 // The sender component of a manager keeps a table of all the
 // net-chans opened for sending and likewise does the receiver.
-type chanTable struct {
-	sync.Mutex             // protects remaining fields
-	t          []chanEntry // the table
-	pending    []chanEntry // only the sender uses this, see sender.go
+type nchTable struct {
+	sync.Mutex            // protects remaining fields
+	t          []nchEntry // the table
+	pending    []nchEntry // only the sender uses this, see sender.go
 }
 
-// An entry in a chanTable. Keep its size 64 bytes on x64 if possible.
-type chanEntry struct {
-	name     hashedName
-	present  bool
-	ch       reflect.Value
-	toSender chan<- int // credits from the credRouter
-	padding  int        // maybe receiver uses other chan?
+// An entry in a nchTable. Keep it 64 bytes on x64 if possible.
+type nchEntry struct {
+	name    hashedName
+	present bool
+
+	sender   *sender
+	halfOpen bool
+	toSender chan<- int
+	quit     <-chan struct{}
+
+	buffer chan<- reflect.Value
 }
 
-// For an entry in the sender's table,
-// numElem is the credit the sender has for the net-chan.
-func (e *chanEntry) credit() *int64 {
-	return &e.numElems
-}
-
-// For an entry in the receiver's table,
-// numElem counts how many elements have been received and put in the buffer.
-func (e *chanEntry) buffered() *int64 {
-	return &e.numElems
-}
-
-func entryByName(table []chanEntry, name hashedName) *chanEntry {
+func entryByName(table []nchEntry, name hashedName) *nchEntry {
 	for i := range table {
-		entry := &table[i]
+		entry = &table[i]
 		if entry.present && entry.name == name {
 			return entry
 		}
@@ -72,15 +64,17 @@ func entryByName(table []chanEntry, name hashedName) *chanEntry {
 	return nil
 }
 
-func addEntry(table []chanEntry, entry chanEntry) (newTable []chanEntry) {
-	for i := range table {
+func addEntry(table []nchEntry, entry nchEntry) (newTable []nchEntry, i int) {
+	for i = range table {
 		if !table[i].present {
 			// reuse empty slot
 			table[i] = entry
-			return table
+			return table, i
 		}
 	}
-	return append(table, entry)
+	i = len(table)
+	newTable = append(table, entry)
+	return
 }
 
 func newErr(str string) error {
