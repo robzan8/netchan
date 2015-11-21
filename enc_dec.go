@@ -8,6 +8,8 @@ import (
 	"reflect"
 )
 
+// review shutdown procedure
+
 const (
 	helloMsg int = 1 + iota
 
@@ -146,7 +148,7 @@ func (l *limitedReader) Read(p []byte) (n int, err error) {
 type decoder struct {
 	toReceiver   chan<- element
 	toCredRecv   chan<- credit
-	table        *chanTable // same table of receiver, needed for type information
+	table        *recvTable // same table of elemRouter, needed for type information
 	mn           *Manager
 	msgSizeLimit int
 	limReader    limitedReader
@@ -197,7 +199,7 @@ func (d *decoder) run() (err error) {
 				d.table.RUnlock()
 				return errInvalidId
 			}
-			elemType := d.table.t[elem.id].ch.Type().Elem()
+			elemType := d.table.t[elem.id].elemType
 			d.table.RUnlock()
 			elem.val = reflect.New(elemType).Elem()
 			err = d.decodeVal(elem.val)
