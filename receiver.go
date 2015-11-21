@@ -85,7 +85,7 @@ func (r *elemRouter) open(name string, ch reflect.Value, bufCap int) error {
 		if entry.present && entry.name == hName {
 			return errAlreadyOpen(name, "Recv")
 		}
-		if !entry.present {
+		if !entry.present && i < id {
 			id = i
 		}
 	}
@@ -105,22 +105,25 @@ func (r *elemRouter) open(name string, ch reflect.Value, bufCap int) error {
 // WARNING: we are not handling initElemMsg
 func (r *elemRouter) handleElem(elem element) error {
 	r.table.Lock()
-	defer r.table.Unlock()
-
 	if elem.id >= len(r.table.t) {
+		r.table.Unlock()
 		return errInvalidId
 	}
 	entry := &r.table.t[elem.id]
 	if !entry.present {
+		r.table.Unlock()
 		return newErr("element arrived for closed net-chan")
 	}
+	buffer := entry.buffer
 	if !elem.ok {
 		// net-chan closed, delete the entry.
-		entry.buffer.Close()
-		*entry = chanEntry{}
+		*entry = recvEntry{}
+		r.table.Unlock()
+		buffer.Close()
 		return nil
 	}
-	buffer := entry.buffer
+	r.table.Unlock()
+
 	select {
 	case buffer <- elem.val:
 		return nil
@@ -137,7 +140,12 @@ func (r *elemRouter) run() {
 			// An error occurred and decoder shut down.
 			return
 		}
-		err := r.handleElem(elem)
+		err := r.mn.Error()
+		if err != nil {
+			// keep draining bla bla
+			continue
+		}
+		err = r.handleElem(elem)
 		if err != nil {
 			go r.mn.ShutDownWith(err)
 		}

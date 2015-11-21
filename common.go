@@ -27,9 +27,9 @@ type element struct {
 // credit represents messages of type:
 // creditMsg and initCredMsg.
 type credit struct {
-	id   int         // ID of the net-chan
-	incr int         // amount of credit
-	name *hashedName // if not nil, this is an initCredMsg
+	id     int         // ID of the net-chan
+	amount int         // amount of credit
+	name   *hashedName // if not nil, this is an initCredMsg
 }
 
 func addEntry(table []nchEntry, entry nchEntry) (newTable []nchEntry, i int) {

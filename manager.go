@@ -3,6 +3,7 @@ package netchan
 /* TODO:
 - more tests
 - fuzzy testing
+- we are not sending/handling initElemMsg
 
 performance:
 - errorsignal scales? is it inlined? use pool of randoms?

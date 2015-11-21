@@ -45,14 +45,14 @@ type sender struct {
 func (s *sender) sendToEncoder(val reflect.Value, ok bool) {
 	elem := element{s.id, val, ok, nil}
 	// Simply sending to the encoder could lead to deadlocks,
-	// also listen to the other channels
+	// keep processing credits
 	for {
 		select {
 		case s.toEncoder <- elem:
 			if !ok {
 				// net-chan has been closed
 				s.table.Lock()
-				s.table[s.id] = nchEntry{}
+				s.table[s.id] = sendEntry{}
 				s.table.Unlock()
 				s.quit = true
 				return
@@ -112,7 +112,7 @@ func (r *credRouter) startSender(entry *sendEntry, ch reflect.Value) {
 	credits := make(chan int)
 
 	go sender{entry.initCred.id, ch, credits, r.mn.ErrorSignal(),
-		r.mn.toEncoder, quit, &r.table, entry.initCred.incr, false}.run()
+		r.mn.toEncoder, quit, &r.table, entry.initCred.amount, false}.run()
 
 	entry.quit = quit
 	entry.toSender = credits
@@ -170,14 +170,18 @@ func (r *credRouter) handleCred(cred credit) error {
 		r.table.Unlock()
 		return nil
 	}
+	if entry.halfOpen {
+		r.table.Unlock()
+		return newErr("credit arrived for half-open net-chan")
+	}
 	toSender := entry.toSender
 	quit := entry.quit
 	r.table.Unlock()
 
-	// if no error, credits will always be processed in a timely fashion by the sender
+	// If it's not shutting down, the sender is always ready to receive credit.
 	select {
-	case toSender <- cred.incr:
-	case <-quit: // net-chan closed, no problem
+	case toSender <- cred.amount:
+	case <-quit: // net-chan closed or error occurred
 	}
 	return nil
 }
@@ -194,12 +198,11 @@ func (r *credRouter) handleCred(cred credit) error {
 //     and we say that the net-chan is half-open, until the user calls Open(Send)
 //     locally. When we see too many half-open net-chans, we assume it's a "syn-flood"
 //     attack and shut down with an error.
-const (
-	maxHoles    = 256
-	maxHalfOpen = 256
-)
-
-func sanityCheck(table []nchEntry) (manyHoles, manyHalfOpen bool) {
+func sanityCheck(table []sendEntry) (manyHoles, manyHalfOpen bool) {
+	const (
+		maxHoles    int = 256
+		maxHalfOpen     = 256
+	)
 	var holes, halfOpen int
 	for i := range table {
 		if !table[i].present {
@@ -230,7 +233,7 @@ func (r *credRouter) handleInitCred(cred credit) error {
 		if manyHoles {
 			return newErr("peer does not reuse IDs of closed net-chans")
 		}
-		r.table.t = append(r.table.t, nchEntry{})
+		r.table.t = append(r.table.t, sendEntry{})
 	case cred.id < len(r.table.t):
 		// id is a recycled slot.
 		if r.table.t[cred.id].present {
@@ -262,7 +265,11 @@ func (r *credRouter) run() {
 			// An error occurred and decoder shut down.
 			return
 		}
-		var err error
+		err := r.mn.Error()
+		if err != nil {
+			// keep draining credits so that decoder doesn't block sending
+			continue
+		}
 		if cred.name == nil {
 			err = r.handleCred(cred)
 		} else {
@@ -270,7 +277,6 @@ func (r *credRouter) run() {
 		}
 		if err != nil {
 			go r.mn.ShutDownWith(err)
-			return
 		}
 	}
 }
