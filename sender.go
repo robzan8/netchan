@@ -70,6 +70,8 @@ func (s *sender) sendToEncoder(val reflect.Value, ok bool) {
 
 // TODO: send initElemMsg?
 func (s sender) run() {
+	defer close(s.quitChan)
+
 	recvSomething := [3]reflect.SelectCase{
 		{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(s.credits)},
 		{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(s.errorSignal)},
@@ -93,12 +95,11 @@ func (s sender) run() {
 		case recvCredit:
 			s.credit += val.Interface().(int)
 		case recvError:
-			s.quit = true
+			return
 		case recvData:
 			s.sendToEncoder(val, ok)
 		}
 	}
-	close(s.quitChan)
 }
 
 type credRouter struct {
@@ -242,7 +243,7 @@ func (r *credRouter) handleInitCred(cred credit) error {
 			return newErr("initial credit arrived with ID alredy taken")
 		}
 	default:
-		return errInvalidId
+		return fmtErr("is this it? id %d, len %d\n", cred.id, len(r.table.t))
 	}
 	ch, present := r.table.pending[*cred.name]
 	r.table.t[cred.id] = sendEntry{

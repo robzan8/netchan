@@ -2,6 +2,7 @@ package netchan
 
 import (
 	"io"
+	"log"
 	"strconv"
 	"testing"
 	"time"
@@ -32,13 +33,13 @@ func intProducer(t *testing.T, mn *Manager, chName string, n int) {
 		ch := make(chan int, 8)
 		err := mn.OpenSend(chName, ch)
 		if err != nil {
-			t.Error(err)
+			log.Fatal(err)
 		}
 		for i := 0; i < n; i++ {
 			select {
 			case ch <- i:
 			case <-mn.ErrorSignal():
-				t.Error(mn.Error())
+				log.Fatal(mn.Error())
 			}
 		}
 		close(ch)
@@ -54,7 +55,7 @@ func intConsumer(t *testing.T, mn *Manager, chName string) <-chan []int {
 		ch := make(chan int, 8)
 		err := mn.OpenRecv(chName, ch, 8)
 		if err != nil {
-			t.Error(err)
+			log.Fatal(err)
 		}
 	Loop:
 		for {
@@ -65,7 +66,7 @@ func intConsumer(t *testing.T, mn *Manager, chName string) <-chan []int {
 				}
 				slice = append(slice, i)
 			case <-mn.ErrorSignal():
-				t.Error(mn.Error())
+				log.Fatal(mn.Error())
 			}
 		}
 		sliceCh <- slice
@@ -77,7 +78,7 @@ func intConsumer(t *testing.T, mn *Manager, chName string) <-chan []int {
 func checkIntSlice(t *testing.T, s []int) {
 	for i, si := range s {
 		if i != si {
-			t.Errorf("expected i == s[i], found i == %d, s[i] == %d", i, si)
+			log.Fatalf("expected i == s[i], found i == %d, s[i] == %d", i, si)
 			return
 		}
 	}
@@ -152,7 +153,7 @@ func sliceProducer(t *testing.T, conn io.ReadWriteCloser) {
 	ch := make(chan []byte, 1)
 	err := mn.OpenSend("slices", ch)
 	if err != nil {
-		t.Error(err)
+		log.Fatal(err)
 	}
 	small := make([]byte, limit-10)
 	big := make([]byte, limit+5)
@@ -164,7 +165,7 @@ func sliceProducer(t *testing.T, conn io.ReadWriteCloser) {
 		select {
 		case ch <- slice:
 		case <-mn.ErrorSignal():
-			t.Error(mn.Error())
+			log.Fatal(mn.Error())
 		}
 	}
 	close(ch)
@@ -175,32 +176,32 @@ func sliceProducer(t *testing.T, conn io.ReadWriteCloser) {
 // the decoder
 func sliceConsumer(t *testing.T, conn io.ReadWriteCloser) {
 	mn := ManageLimit(conn, limit)
-	// use a receive channel with capacity 1, so that items come
+	// use a receive buffer with capacity 1, so that items come
 	// one at a time and we get the error for the last one only
 	ch := make(chan []byte)
 	err := mn.OpenRecv("slices", ch, 1)
 	if err != nil {
-		t.Error(err)
+		log.Fatal(err)
 	}
 	for i := 1; i <= numSlices; i++ {
 		if i < numSlices {
 			select {
 			case <-ch:
 			case <-mn.ErrorSignal():
-				t.Error(mn.Error())
+				log.Fatal(mn.Error())
 			}
 			continue
 		}
 		// i == numSlices, expect errSizeExceeded
 		select {
 		case <-ch:
-			t.Error("manager did not block too big message")
+			log.Fatal("manager did not block too big message")
 		case <-mn.ErrorSignal():
 			err := mn.Error()
 			if err == errMsgTooBig {
 				return // success
 			}
-			t.Error(err)
+			log.Fatal(err)
 		}
 	}
 }

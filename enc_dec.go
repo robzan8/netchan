@@ -81,15 +81,24 @@ func (e *encoder) encode(v interface{}) {
 }
 
 func (e *encoder) run() {
-	e.encode(header{helloMsg, 0})
+	defer func() {
+		err := e.mn.Error()
+		netErr, ok := err.(net.Error)
+		if ok {
+			e.encode(header{netErrorMsg, 0})
+			e.encode(netError{netErr.Error(), netErr.Timeout(), netErr.Temporary()})
+		} else {
+			e.encode(header{errorMsg, 0})
+			e.encode(err.Error())
+		}
+		e.mn.closeConn()
+	}()
 
-	// exit loop when both channels have been closed
-	for e.elemCh != nil || e.creditCh != nil {
+	e.encode(header{helloMsg, 0})
+	for {
 		select {
-		case elem, ok := <-e.elemCh:
+		case elem := <-e.elemCh:
 			switch {
-			case !ok:
-				e.elemCh = nil
 			case elem.name != nil:
 				e.encode(header{initElemMsg, 0})
 				e.encode(elem.name)
@@ -100,10 +109,8 @@ func (e *encoder) run() {
 				e.encodeVal(elem.val)
 			}
 
-		case cred, ok := <-e.creditCh:
+		case cred := <-e.creditCh:
 			switch {
-			case !ok:
-				e.creditCh = nil
 			case cred.name != nil:
 				e.encode(header{initCredMsg, cred.id})
 				e.encode(cred.amount)
@@ -112,18 +119,11 @@ func (e *encoder) run() {
 				e.encode(header{creditMsg, cred.id})
 				e.encode(cred.amount)
 			}
+
+		case <-e.mn.ErrorSignal():
+			return
 		}
 	}
-	err := e.mn.Error()
-	netErr, ok := err.(net.Error)
-	if ok {
-		e.encode(header{netErrorMsg, 0})
-		e.encode(netError{netErr.Error(), netErr.Timeout(), netErr.Temporary()})
-	} else {
-		e.encode(header{errorMsg, 0})
-		e.encode(err.Error())
-	}
-	e.mn.closeConn()
 }
 
 // Like io.LimitedReader, but returns a custom error.
@@ -252,7 +252,7 @@ func (d *decoder) run() (err error) {
 			if errString == io.EOF.Error() {
 				return io.EOF
 			}
-			return errors.New("netchan error from peer: " + errString)
+			return errors.New("netchan, error from peer: " + errString)
 
 		case netErrorMsg:
 			netErr := new(netError)
@@ -260,7 +260,7 @@ func (d *decoder) run() (err error) {
 			if err != nil {
 				return
 			}
-			netErr.Str = "netchan error from peer: " + netErr.Str
+			netErr.Str = "netchan, error from peer: " + netErr.Str
 			return netErr
 
 		default:

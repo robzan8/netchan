@@ -247,7 +247,7 @@ func (m *Manager) ShutDownWith(err error) error {
 	// it closes the connection and we wake up and return
 	case <-m.closeOnce.done:
 	// if encoder takes too long, we close the connection ourself
-	case <-time.After(5 * time.Second):
+	case <-time.After(1 * time.Second):
 		m.closeConn()
 	}
 	return m.closeErr
