@@ -102,6 +102,7 @@ func (r *elemRouter) open(name string, ch reflect.Value, bufCap int) error {
 	r.table.t[id] = recvEntry{hName, true, buffer}
 	r.types.t[id] = ch.Type().Elem()
 
+	// per sistemare sta roba bisognerebbe fare send dentro lock :/
 	r.sendToEncoder(credit{r.id, r.bufCap, &r.name}) // initial credit
 
 	go receiver{id, hName, buffer, r.mn.ErrorSignal(),
