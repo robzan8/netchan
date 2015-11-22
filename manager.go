@@ -11,6 +11,7 @@ package netchan
 performance:
 - errorsignal scales? is it inlined? use pool of randoms?
 - profile time and memory
+- gob buffered writer?
 - adjust ShutDown timeout
 */
 
