@@ -84,10 +84,10 @@ func (s sender) run() {
 	)
 	for !s.quit {
 		var numCases int
+		// If no credit, do not receive from user channel (3rd case).
 		if s.credit > 0 {
 			numCases = 3
 		} else {
-			// Do not receive from user channel (3rd case).
 			numCases = 2
 		}
 		i, val, ok := reflect.Select(recvSomething[0:numCases])
@@ -200,21 +200,10 @@ func (r *credRouter) handleCred(cred credit) error {
 //     and we say that the net-chan is half-open, until the user calls Open(Send)
 //     locally. When we see too many half-open net-chans, we assume it's a "syn-flood"
 //     attack and shut down with an error.
-func sanityCheck(table []sendEntry) (manyHoles, manyHalfOpen bool) {
-	const (
-		maxHoles    int = 256
-		maxHalfOpen     = 256
-	)
-	var holes, halfOpen int
-	for i := range table {
-		if !table[i].present {
-			holes++
-		} else if table[i].halfOpen {
-			halfOpen++
-		}
-	}
-	return holes > maxHoles, halfOpen > maxHalfOpen
-}
+const (
+	maxHoles    int = 256
+	maxHalfOpen     = 256
+)
 
 // An initial credit arrived.
 func (r *credRouter) handleInitCred(cred credit) error {
@@ -225,26 +214,33 @@ func (r *credRouter) handleInitCred(cred credit) error {
 	if entry != nil {
 		return newErr("initial credit arrived for already open net-chan")
 	}
-	manyHoles, manyHalfOpen := sanityCheck(r.table.t)
-	if manyHalfOpen {
+	var holes, halfOpen int
+	for i := range r.table.t {
+		if !r.table.t[i].present {
+			holes++
+		} else if r.table.t[i].halfOpen {
+			halfOpen++
+		}
+	}
+	if halfOpen > maxHalfOpen {
 		return newErr("too many half open net-chans")
 	}
-	switch {
-	case cred.id == len(r.table.t):
-		// id is a fresh slot.
-		if manyHoles {
-			return newErr("peer does not reuse IDs of closed net-chans")
-		}
-		r.table.t = append(r.table.t, sendEntry{})
-	case cred.id < len(r.table.t):
+
+	if cred.id < len(r.table.t) {
 		// id is a recycled slot.
 		if r.table.t[cred.id].present {
 			// But it's not free.
 			return newErr("initial credit arrived with ID alredy taken")
 		}
-	default:
-		return errInvalidId
+	} else {
+		// id is a fresh slot.
+		extend := cred.id - len(r.table.t) + 1
+		if holes+extend > maxHoles {
+			return newErr("many holes")
+		}
+		r.table.t = append(r.table.t, make([]sendEntry, extend)...)
 	}
+
 	ch, present := r.table.pending[*cred.name]
 	r.table.t[cred.id] = sendEntry{
 		name:     *cred.name,
