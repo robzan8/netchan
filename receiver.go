@@ -48,7 +48,6 @@ func (r *receiver) sendToEncoder(cred credit) {
 }
 
 func (r receiver) run() {
-	r.sendToEncoder(credit{r.id, r.bufCap, &r.name}) // initial credit
 	for !r.quit {
 		select {
 		case val, ok := <-r.buffer:
@@ -102,6 +101,8 @@ func (r *elemRouter) open(name string, ch reflect.Value, bufCap int) error {
 	buffer := make(chan reflect.Value, bufCap)
 	r.table.t[id] = recvEntry{hName, true, buffer}
 	r.types.t[id] = ch.Type().Elem()
+
+	r.sendToEncoder(credit{r.id, r.bufCap, &r.name}) // initial credit
 
 	go receiver{id, hName, buffer, r.mn.ErrorSignal(),
 		ch, r.toEncoder, bufCap, 0, false}.run()

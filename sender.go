@@ -243,7 +243,7 @@ func (r *credRouter) handleInitCred(cred credit) error {
 			return newErr("initial credit arrived with ID alredy taken")
 		}
 	default:
-		return fmtErr("is this it? id %d, len %d\n", cred.id, len(r.table.t))
+		return errInvalidId
 	}
 	ch, present := r.table.pending[*cred.name]
 	r.table.t[cred.id] = sendEntry{

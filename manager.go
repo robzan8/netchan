@@ -123,7 +123,9 @@ func ManageLimit(conn io.ReadWriteCloser, msgSizeLimit int) *Manager {
 	}
 
 	// create all the components, connect them with channels and fire up the goroutines.
-	mn := &Manager{conn: conn, elemRtr: new(elemRouter), credRtr: new(credRouter)}
+	elemRtr := new(elemRouter)
+	credRtr := new(credRouter)
+	mn := &Manager{conn: conn, elemRtr: elemRtr, credRtr: credRtr}
 	mn.errOnce.done = make(chan struct{})
 	mn.closeOnce.done = make(chan struct{})
 
@@ -144,9 +146,9 @@ func ManageLimit(conn io.ReadWriteCloser, msgSizeLimit int) *Manager {
 	}
 	dec.dec = gob.NewDecoder(&dec.limReader)
 
-	*mn.elemRtr = elemRouter{elements: recvElemCh,
+	*elemRtr = elemRouter{elements: recvElemCh,
 		toEncoder: sendCredCh, types: &dec.types, mn: mn}
-	*mn.credRtr = credRouter{credits: recvCredCh, toEncoder: sendElemCh, mn: mn,
+	*credRtr = credRouter{credits: recvCredCh, toEncoder: sendElemCh, mn: mn,
 		table: sendTable{pending: make(map[hashedName]reflect.Value)}}
 
 	go mn.elemRtr.run()
