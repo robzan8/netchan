@@ -87,26 +87,26 @@ func checkIntSlice(t *testing.T, s []int) {
 // start the producer before the consumer
 func TestSendThenRecv(t *testing.T) {
 	sideA, sideB := newPipeConn()
-	intProducer(t, Manage(sideA), "integers", 100)
+	intProducer(t, Manage(sideA, 0), "integers", 100)
 	time.Sleep(50 * time.Millisecond)
-	s := <-intConsumer(t, Manage(sideB), "integers")
+	s := <-intConsumer(t, Manage(sideB, 0), "integers")
 	checkIntSlice(t, s)
 }
 
 // start the consumer before the producer
 func TestRecvThenSend(t *testing.T) {
 	sideA, sideB := newPipeConn()
-	sliceCh := intConsumer(t, Manage(sideB), "integers")
+	sliceCh := intConsumer(t, Manage(sideB, 0), "integers")
 	time.Sleep(50 * time.Millisecond)
-	intProducer(t, Manage(sideA), "integers", 100)
+	intProducer(t, Manage(sideA, 0), "integers", 100)
 	checkIntSlice(t, <-sliceCh)
 }
 
 // open many chans in both directions
 func TestManyChans(t *testing.T) {
 	sideA, sideB := newPipeConn()
-	manA := Manage(sideA)
-	manB := Manage(sideB)
+	manA := Manage(sideA, 0)
+	manB := Manage(sideB, 0)
 	var sliceChans [100]<-chan []int
 	for i := range sliceChans {
 		chName := "integers" + strconv.Itoa(i)
@@ -131,8 +131,8 @@ func TestManyChans(t *testing.T) {
 // TODO: find a better way of testing this
 func TestCredits(t *testing.T) {
 	sideA, sideB := newPipeConn()
-	intProducer(t, Manage(sideA), "integers", 1000)
-	s := <-intConsumer(t, Manage(sideB), "integers")
+	intProducer(t, Manage(sideA, 0), "integers", 1000)
+	s := <-intConsumer(t, Manage(sideB, 0), "integers")
 	checkIntSlice(t, s)
 }
 
@@ -149,7 +149,7 @@ const (
 
 // sliceProducer sends on "slices". The last slice will be too big.
 func sliceProducer(t *testing.T, conn io.ReadWriteCloser) {
-	mn := Manage(conn)
+	mn := Manage(conn, 0)
 	ch := make(chan []byte, 1)
 	err := mn.OpenSend("slices", ch)
 	if err != nil {
@@ -175,7 +175,7 @@ func sliceProducer(t *testing.T, conn io.ReadWriteCloser) {
 // and must generate an error that matches the one returned by the limitedReader used by
 // the decoder
 func sliceConsumer(t *testing.T, conn io.ReadWriteCloser) {
-	mn := ManageLimit(conn, limit)
+	mn := Manage(conn, limit)
 	// use a receive buffer with capacity 1, so that items come
 	// one at a time and we get the error for the last one only
 	ch := make(chan []byte)

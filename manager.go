@@ -4,6 +4,7 @@ package netchan
 - more tests
 - fuzzy testing
 - we are not sending/handling initElemMsg
+- transmit gob structs for protocol extensibility?
 
 performance:
 - errorsignal scales? is it inlined? use pool of randoms?
@@ -109,17 +110,14 @@ the peer and closes the connection.
 //
 // There is a default limit imposed on the size of incoming gob messages. To change it,
 // use ManageLimit.
-func Manage(conn io.ReadWriteCloser) *Manager {
-	return ManageLimit(conn, 0)
-}
-
+//
 // ManageLimit is like Manage, but also allows to specify the maximum size of the gob
 // messages that will be accepted from the connection. If msgSizeLimit is 0 or negative,
 // the default will be used. When a too big message is received, an error is signaled on
 // this manager and the manager shuts down.
-func ManageLimit(conn io.ReadWriteCloser, msgSizeLimit int) *Manager {
+func Manage(conn io.ReadWriteCloser, msgSizeLimit int) *Manager {
 	if msgSizeLimit <= 0 {
-		msgSizeLimit = 32 * 1024
+		msgSizeLimit = 16 * 1024
 	}
 
 	// create all the components, connect them with channels and fire up the goroutines.

@@ -71,18 +71,14 @@ func (e *encoder) encodeVal(v reflect.Value) {
 		return
 	}
 	e.err = e.enc.EncodeValue(v)
-	if e.err != nil {
-		go e.mn.ShutDownWith(e.err)
-	}
 }
 
 func (e *encoder) encode(v interface{}) {
 	e.encodeVal(reflect.ValueOf(v))
 }
 
-func (e *encoder) run() {
+func (e *encoder) run() (err error) {
 	defer func() {
-		err := e.mn.Error()
 		netErr, ok := err.(net.Error)
 		if ok {
 			e.encode(header{netErrorMsg, 0})
@@ -96,6 +92,10 @@ func (e *encoder) run() {
 
 	e.encode(header{helloMsg, 0})
 	for {
+		if e.err != nil {
+			go e.mn.ShutDownWith(err)
+			return e.err
+		}
 		select {
 		case elem := <-e.elemCh:
 			switch {
@@ -121,7 +121,7 @@ func (e *encoder) run() {
 			}
 
 		case <-e.mn.ErrorSignal():
-			return
+			return e.mn.Error()
 		}
 	}
 }
@@ -171,12 +171,12 @@ func (d *decoder) decode(v interface{}) error {
 }
 
 func (d *decoder) run() (err error) {
-	// run returns only in case of error/shutdown
 	defer func() {
 		go d.mn.ShutDownWith(err)
 		close(d.toReceiver)
 		close(d.toCredRecv)
 	}()
+
 	var h header
 	err = d.decode(&h)
 	if err != nil {
