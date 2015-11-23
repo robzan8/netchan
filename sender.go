@@ -48,9 +48,6 @@ func (s *sender) sendToEncoder(elem element) {
 	for {
 		select {
 		case s.toEncoder <- elem:
-			if !elem.flush && !elem.close {
-				s.credit--
-			}
 			return
 		case cred := <-s.credits:
 			s.credit += cred
@@ -65,30 +62,24 @@ func (s *sender) sendToEncoder(elem element) {
 func (s sender) run() {
 	defer close(s.quit)
 
-	recvSomething := [3]reflect.SelectCase{
+	recvSomething := [...]reflect.SelectCase{
+		{Dir: reflect.SelectRecv, Chan: s.ch},
 		{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(s.credits)},
 		{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(s.errorSignal)},
-		{Dir: reflect.SelectRecv, Chan: s.ch},
 	}
 	const (
-		recvCredit int = iota
+		recvData int = iota
+		recvCredit
 		recvError
-		recvData
 	)
 	for !s.errOccurred {
-		var numCases int
-		// If no credit, do not receive from user channel (3rd case).
-		if s.credit > 0 {
-			numCases = 3
-		} else {
-			numCases = 2
+		// If no credit, do not receive from user channel (case 0).
+		var firstCase int
+		if s.credit == 0 {
+			firstCase = 1
 		}
-		i, val, ok := reflect.Select(recvSomething[0:numCases])
+		i, val, ok := reflect.Select(recvSomething[firstCase:])
 		switch i {
-		case recvCredit:
-			s.credit += val.Interface().(int)
-		case recvError:
-			return
 		case recvData:
 			if !ok {
 				s.sendToEncoder(element{id: s.id, close: true})
@@ -103,13 +94,17 @@ func (s sender) run() {
 				continue
 			}
 			s.sendToEncoder(element{id: s.id, val: val})
-			if !s.errOccurred && s.credit == 0 {
-				// If no credit, we don't receive from the user channel and the following
-				// might happen: the user wants to issue a flush, we ignore it, the data
-				// never arrives to peer, peer doesn't send credit and we block. So we
-				// must flush preventively here.
+			s.credit--
+			if s.credit == 0 {
+				// If no credit, we don't receive from the user channel. Even if the user
+				// wants to issue a flush, we ignore it, the data never arrives to peer,
+				// peer doesn't send credit and user blocks. Flush preventively:
 				s.sendToEncoder(element{flush: true})
 			}
+		case recvCredit:
+			s.credit += val.Interface().(int)
+		case recvError:
+			return
 		}
 	}
 }

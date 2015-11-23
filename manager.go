@@ -5,11 +5,11 @@ package netchan
 - fuzzy testing
 - we are not sending/handling initElemMsg
 - transmit gob structs for protocol extensibility?
+----do one single write for each netchan message
 - rename routers
 - check if branch timers does something more than master
 
 performance:
-- errorsignal scales? is it inlined? use pool of randoms?
 - profile time and memory
 - gob buffered writer?
 ---- automatic flush when close a channel?
