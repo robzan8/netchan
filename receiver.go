@@ -25,7 +25,7 @@ type receiver struct {
 	toEncoder   chan<- credit
 	bufCap      int
 	received    int
-	quit        bool
+	errOccurred bool
 }
 
 func (r *receiver) sendToUser(val reflect.Value) {
@@ -35,7 +35,7 @@ func (r *receiver) sendToUser(val reflect.Value) {
 	}
 	i, _, _ := reflect.Select(sendAndError[:])
 	if i == 1 { // errorSignal
-		r.quit = true
+		r.errOccurred = true
 	}
 }
 
@@ -43,13 +43,13 @@ func (r *receiver) sendToEncoder(cred credit) {
 	select {
 	case r.toEncoder <- cred:
 	case <-r.errorSignal:
-		r.quit = true
+		r.errOccurred = true
 	}
 }
 
 func (r receiver) run() {
 	r.sendToEncoder(credit{r.id, r.bufCap, &r.name}) // initial credit
-	for !r.quit {
+	for !r.errOccurred {
 		select {
 		case val, ok := <-r.buffer:
 			if !ok {

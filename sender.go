@@ -36,33 +36,26 @@ type sender struct {
 	credits     <-chan int
 	errorSignal <-chan struct{}
 	toEncoder   chan<- element
-	quitChan    chan<- struct{}
+	quit        chan<- struct{}
 	table       *sendTable // table of the credit router
 	credit      int
-	quit        bool
+	errOccurred bool
 }
 
-func (s *sender) sendToEncoder(val reflect.Value, ok bool) {
-	elem := element{s.id, val, ok, nil}
+func (s *sender) sendToEncoder(elem element) {
 	// Simply sending to the encoder could lead to deadlocks,
 	// keep processing credits
 	for {
 		select {
 		case s.toEncoder <- elem:
-			if !ok {
-				// net-chan has been closed
-				s.table.Lock()
-				s.table.t[s.id] = sendEntry{}
-				s.table.Unlock()
-				s.quit = true
-				return
+			if !elem.flush && !elem.close {
+				s.credit--
 			}
-			s.credit--
 			return
 		case cred := <-s.credits:
 			s.credit += cred
 		case <-s.errorSignal:
-			s.quit = true
+			s.errOccurred = true
 			return
 		}
 	}
@@ -70,7 +63,7 @@ func (s *sender) sendToEncoder(val reflect.Value, ok bool) {
 
 // TODO: send initElemMsg?
 func (s sender) run() {
-	defer close(s.quitChan)
+	defer close(s.quit)
 
 	recvSomething := [3]reflect.SelectCase{
 		{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(s.credits)},
@@ -82,7 +75,7 @@ func (s sender) run() {
 		recvError
 		recvData
 	)
-	for !s.quit {
+	for !s.errOccurred {
 		var numCases int
 		// If no credit, do not receive from user channel (3rd case).
 		if s.credit > 0 {
@@ -97,7 +90,26 @@ func (s sender) run() {
 		case recvError:
 			return
 		case recvData:
-			s.sendToEncoder(val, ok)
+			if !ok {
+				s.sendToEncoder(element{id: s.id, close: true})
+				s.table.Lock()
+				s.table.t[s.id] = sendEntry{}
+				s.table.Unlock()
+				return
+			}
+			f, fOk := val.Interface().(NetchanFlusher)
+			if fOk && f.NetchanFlush() {
+				s.sendToEncoder(element{flush: true})
+				continue
+			}
+			s.sendToEncoder(element{id: s.id, val: val})
+			if !s.errOccurred && s.credit == 0 {
+				// If no credit, we don't receive from the user channel and the following
+				// might happen: the user wants to issue a flush, we ignore it, the data
+				// never arrives to peer, peer doesn't send credit and we block. So we
+				// must flush preventively here.
+				s.sendToEncoder(element{flush: true})
+			}
 		}
 	}
 }

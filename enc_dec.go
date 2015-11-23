@@ -117,14 +117,11 @@ func (e *encoder) run() (err error) {
 			case !elem.ok:
 				e.encode(header{closeMsg, elem.id})
 				e.flush()
+			case elem.flush:
+				e.flush()
 			default:
-				nf, ok := elem.val.Interface().(NetchanFlusher)
-				if ok && nf.NetchanFlush() {
-					e.flush()
-				} else {
-					e.encode(header{elemMsg, elem.id})
-					e.encodeVal(elem.val)
-				}
+				e.encode(header{elemMsg, elem.id})
+				e.encodeVal(elem.val)
 			}
 
 		case cred := <-e.creditCh:
@@ -137,6 +134,7 @@ func (e *encoder) run() (err error) {
 				e.encode(header{creditMsg, cred.id})
 				e.encode(cred.amount)
 			}
+			e.flush()
 
 		case <-e.mn.ErrorSignal():
 			return e.mn.Error()

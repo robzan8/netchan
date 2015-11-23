@@ -18,10 +18,11 @@ func hashName(name string) hashedName {
 // element is used internally to represent messages of type:
 // elemMsg, initElemMsg and closeMsg.
 type element struct {
-	id   int           // ID of the net-chan
-	val  reflect.Value // user data
-	ok   bool          // if !ok, this is a closeMsg
-	name *hashedName   // if not nil, this is an initElemMsg (overrides !ok)
+	id    int           // ID of the net-chan
+	val   reflect.Value // user data
+	flush bool          // if flush, this issues a flush and does not carry data
+	close bool          // if close, this is a closeMsg (overrides flush and always flushes)
+	name  *hashedName   // if not nil, this is an initElemMsg (overrides flush and close)
 }
 
 // credit represents messages of type:
