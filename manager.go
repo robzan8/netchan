@@ -12,6 +12,7 @@ performance:
 - errorsignal scales? is it inlined? use pool of randoms?
 - profile time and memory
 - gob buffered writer?
+---- automatic flush when close a channel?
 - adjust ShutDown timeout
 */
 
@@ -62,6 +63,10 @@ type Manager struct {
 
 	errOnce, closeOnce once
 	err, closeErr      error
+}
+
+type flusher interface {
+	Flush() error
 }
 
 /*
@@ -138,6 +143,13 @@ func Manage(conn io.ReadWriteCloser, msgSizeLimit int) *Manager {
 
 	enc := &encoder{elemCh: sendElemCh, creditCh: sendCredCh, mn: mn}
 	enc.enc = gob.NewEncoder(conn)
+	f, ok := conn.(flusher)
+	if ok {
+		enc.flushFn = f.Flush
+	} else {
+		enc.flushFn = func() error { return nil }
+	}
+
 	dec := &decoder{
 		toReceiver:   recvElemCh,
 		toCredRecv:   recvCredCh,

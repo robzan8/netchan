@@ -55,18 +55,23 @@ func (e *netError) Temporary() bool {
 	return e.IsTemporary
 }
 
+type NetchanFlusher interface {
+	NetchanFlush() bool
+}
+
 type encoder struct {
 	elemCh   <-chan element // from sender
 	creditCh <-chan credit  // from credit sender
 	mn       *Manager
 	enc      *gob.Encoder
+	flushFn  func() error
 
 	err error
 }
 
 func (e *encoder) encodeVal(v reflect.Value) {
-	// when an encoding error occurs, encoder.err
-	// is set and all encode operations become NOPs
+	// when an encoding error occurs, e.err is set
+	// and subsequent encode operations become NOPs
 	if e.err != nil {
 		return
 	}
@@ -75,6 +80,13 @@ func (e *encoder) encodeVal(v reflect.Value) {
 
 func (e *encoder) encode(v interface{}) {
 	e.encodeVal(reflect.ValueOf(v))
+}
+
+func (e *encoder) flush() {
+	if e.err != nil {
+		return
+	}
+	e.err = e.flushFn()
 }
 
 func (e *encoder) run() (err error) {
@@ -104,9 +116,15 @@ func (e *encoder) run() (err error) {
 				e.encode(elem.name)
 			case !elem.ok:
 				e.encode(header{closeMsg, elem.id})
+				e.flush()
 			default:
-				e.encode(header{elemMsg, elem.id})
-				e.encodeVal(elem.val)
+				nf, ok := elem.val.Interface().(NetchanFlusher)
+				if ok && nf.NetchanFlush() {
+					e.flush()
+				} else {
+					e.encode(header{elemMsg, elem.id})
+					e.encodeVal(elem.val)
+				}
 			}
 
 		case cred := <-e.creditCh:
