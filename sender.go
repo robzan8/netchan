@@ -7,7 +7,7 @@ import (
 )
 
 type sendEntry struct {
-	halfOpen bool
+	dataChan reflect.Value
 	initCred int
 	credits  chan<- int
 	quit     <-chan struct{}
@@ -15,8 +15,7 @@ type sendEntry struct {
 
 type sendTable struct {
 	sync.Mutex
-	t       map[hashedName]*sendEntry
-	pending map[hashedName]reflect.Value
+	t map[hashedName]*sendEntry
 }
 
 type sender struct {
@@ -115,13 +114,14 @@ type credRouter struct {
 	halfOpen  int32
 }
 
-func (r *credRouter) startSender(name hashedName, entry *sendEntry, ch reflect.Value) {
+func (r *credRouter) startSender(name hashedName, entry *sendEntry) {
 	credits := make(chan int)
-	entry.credits = credits
 	quit := make(chan struct{})
+
+	entry.credits = credits
 	entry.quit = quit
 
-	go sender{name, ch, credits, r.mn.ErrorSignal(),
+	go sender{name, entry.dataChan, credits, r.mn.ErrorSignal(),
 		r.toEncoder, quit, &r.table, entry.initCred, false}.run()
 	return
 }
@@ -146,20 +146,16 @@ func (r *credRouter) open(nameStr string, ch reflect.Value) error {
 	entry, present := r.table.t[name]
 	if present {
 		// Initial credit already arrived.
-		if !entry.halfOpen {
+		if entry.dataChan != (reflect.Value{}) {
 			return errAlreadyOpen("Send", nameStr)
 		}
-		r.startSender(name, entry, ch)
-		entry.halfOpen = false
+		entry.dataChan = ch
+		r.startSender(name, entry)
 		atomic.AddInt32(&r.halfOpen, -1)
 		return nil
 	}
 	// Initial credit did not arrive yet.
-	_, pending := r.table.pending[name]
-	if pending {
-		return errAlreadyOpen("Send", nameStr)
-	}
-	r.table.pending[name] = ch
+	r.table.t[name] = &sendEntry{dataChan: ch}
 	return nil
 }
 
@@ -173,14 +169,13 @@ func (r *credRouter) handleCred(name hashedName, cred *credit) error {
 		r.table.Unlock()
 		return nil
 	}
-	if entry.halfOpen {
-		r.table.Unlock()
-		return newErr("credit arrived for half-open net-chan")
-	}
 	toSender := entry.credits
 	quit := entry.quit
 	r.table.Unlock()
 
+	if toSender == nil {
+		return newErr("credit arrived for half-open net-chan")
+	}
 	// If it's not shutting down, the sender is always ready to receive credit.
 	select {
 	case toSender <- cred.Amount:
@@ -205,27 +200,22 @@ func (r *credRouter) handleInitCred(name hashedName, cred *initialCredit) error 
 	r.table.Lock()
 	defer r.table.Unlock()
 
-	_, present := r.table.t[name]
+	entry, present := r.table.t[name]
 	if present {
-		return newErr("initial credit arrived for already open net-chan")
-	}
-
-	ch, pending := r.table.pending[name]
-	newEntry := &sendEntry{
-		halfOpen: !pending,
-		initCred: cred.Amount,
-	}
-	r.table.t[name] = newEntry
-	if pending {
 		// User already called Open(Send).
-		r.startSender(name, newEntry, ch)
-		delete(r.table.pending, name)
-	} else {
-		halfOpen := atomic.AddInt32(&r.halfOpen, 1)
-		if halfOpen > maxHalfOpen {
-			return newErr("too many half open net-chans")
+		if entry.initCred != 0 {
+			return newErr("initial credit arrived for already open net-chan")
 		}
+		entry.initCred = cred.Amount
+		r.startSender(name, entry)
+		return nil
 	}
+	// User didn't call Open(Send) yet.
+	halfOpen := atomic.AddInt32(&r.halfOpen, 1)
+	if halfOpen > maxHalfOpen {
+		return newErr("too many half open net-chans")
+	}
+	r.table.t[name] = &sendEntry{initCred: cred.Amount}
 	return nil
 }
 

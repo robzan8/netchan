@@ -255,8 +255,8 @@ func (d *decoder) run() (err error) {
 			if err != nil {
 				return
 			}
-			if initCred.Amount < 0 {
-				return newErr("initial credit with negative value received")
+			if initCred.Amount <= 0 {
+				return newErr("initial credit with non-positive value received")
 			}
 			d.toCredRtr <- message{h.Name, initCred}
 

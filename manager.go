@@ -162,7 +162,6 @@ func Manage(conn io.ReadWriteCloser, msgSizeLimit int) *Manager {
 	elemRtr.buffers = make(map[hashedName]chan<- reflect.Value)
 	*credRtr = credRouter{credits: credRtrCh, toEncoder: encCh, mn: mn}
 	credRtr.table.t = make(map[hashedName]*sendEntry)
-	credRtr.table.pending = make(map[hashedName]reflect.Value)
 
 	go mn.elemRtr.run()
 	go mn.credRtr.run()
