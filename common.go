@@ -15,23 +15,43 @@ func hashName(name string) hashedName {
 	return sha1.Sum([]byte(name))
 }
 
-// element is used internally to represent messages of type:
-// elemMsg, initElemMsg and closeMsg.
-type element struct {
-	id    int           // ID of the net-chan
-	val   reflect.Value // user data
-	flush bool          // if flush, this issues a flush and does not carry data
-	close bool          // if close, this is a closeMsg (overrides flush and always flushes)
-	name  *hashedName   // if not nil, this is an initElemMsg (overrides flush and close)
+// returns ceil(x/y)
+func ceilDivide(x, y int) int {
+	return (x + y - 1) / y
 }
 
-// credit represents messages of type:
-// creditMsg and initCredMsg.
-type credit struct {
-	id     int         // ID of the net-chan
-	amount int         // amount of credit
-	name   *hashedName // if not nil, this is an initCredMsg
+type message struct {
+	name    hashedName
+	payload interface{}
 }
+
+// element payloads:
+
+type hello struct{}
+
+type userData struct {
+	val reflect.Value
+}
+
+type wantToSend struct{}
+
+type flush struct{}
+
+type wantToFlush1 struct{}
+
+type wantToFlush2 struct{}
+
+type endOfStream struct{}
+
+// credit payloads:
+
+type credit struct {
+	Amount int
+}
+
+type initialCredit credit
+
+// errors:
 
 func newErr(str string) error {
 	return errors.New("netchan: " + str)

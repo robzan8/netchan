@@ -11,8 +11,6 @@ package netchan
 
 performance:
 - profile time and memory
-- gob buffered writer?
----- automatic flush when close a channel?
 - adjust ShutDown timeout
 */
 
@@ -136,33 +134,35 @@ func Manage(conn io.ReadWriteCloser, msgSizeLimit int) *Manager {
 	mn.closeOnce.done = make(chan struct{})
 
 	const chCap int = 0
-	recvElemCh := make(chan element, chCap)
-	recvCredCh := make(chan credit, chCap)
-	sendElemCh := make(chan element, chCap)
-	sendCredCh := make(chan credit, chCap)
+	elemRtrCh := make(chan message, chCap)
+	credRtrCh := make(chan message, chCap)
+	encCh := make(chan message, chCap)
 
-	enc := &encoder{elemCh: sendElemCh, creditCh: sendCredCh, mn: mn}
+	enc := &encoder{messages: encCh, mn: mn}
 	enc.enc = gob.NewEncoder(conn)
-	f, ok := conn.(flusher)
+	/*f, ok := conn.(flusher)
 	if ok {
 		enc.flushFn = f.Flush
 	} else {
 		enc.flushFn = func() error { return nil }
-	}
+	}*/
 
 	dec := &decoder{
-		toReceiver:   recvElemCh,
-		toCredRecv:   recvCredCh,
+		toElemRtr:    elemRtrCh,
+		toCredRtr:    credRtrCh,
+		types:        typeTable{t: make(map[hashedName]reflect.Type)},
 		mn:           mn,
 		msgSizeLimit: msgSizeLimit,
 		limReader:    limitedReader{R: conn},
 	}
 	dec.dec = gob.NewDecoder(&dec.limReader)
 
-	*elemRtr = elemRouter{elements: recvElemCh,
-		toEncoder: sendCredCh, types: &dec.types, mn: mn}
-	*credRtr = credRouter{credits: recvCredCh, toEncoder: sendElemCh, mn: mn,
-		table: sendTable{pending: make(map[hashedName]reflect.Value)}}
+	*elemRtr = elemRouter{elements: elemRtrCh,
+		toEncoder: encCh, types: &dec.types, mn: mn}
+	elemRtr.buffers = make(map[hashedName]chan<- reflect.Value)
+	*credRtr = credRouter{credits: credRtrCh, toEncoder: encCh, mn: mn}
+	credRtr.table.t = make(map[hashedName]*sendEntry)
+	credRtr.table.pending = make(map[hashedName]reflect.Value)
 
 	go mn.elemRtr.run()
 	go mn.credRtr.run()

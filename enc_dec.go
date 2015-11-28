@@ -9,31 +9,29 @@ import (
 	"sync"
 )
 
-// review shutdown procedure
-
 const (
-	helloMsg int = 1 + iota
+	helloT int = 1 + iota
 
 	// element messages
-	elemMsg
-	initElemMsg
-	closeMsg
+	userDataT
+	wantToSendT
+	endOfStreamT
 
 	// credit messages
-	creditMsg
-	initCredMsg
+	creditT
+	initialCreditT
 
 	// error messages
-	errorMsg
-	netErrorMsg
+	errorT
+	netErrorT
 
-	lastReserved = 15
+	lastReservedT = 15
 )
 
 // preceedes every message
 type header struct {
 	MsgType int
-	ChanID  int
+	Name    hashedName
 }
 
 // used to transmit errors that implement net.Error
@@ -60,8 +58,7 @@ type NetchanFlusher interface {
 }
 
 type encoder struct {
-	elemCh   <-chan element // from sender
-	creditCh <-chan credit  // from credit sender
+	messages <-chan message
 	mn       *Manager
 	enc      *gob.Encoder
 	flushFn  func() error
@@ -93,51 +90,48 @@ func (e *encoder) run() (err error) {
 	defer func() {
 		netErr, ok := err.(net.Error)
 		if ok {
-			e.encode(header{netErrorMsg, 0})
+			e.encode(header{MsgType: netErrorT})
 			e.encode(netError{netErr.Error(), netErr.Timeout(), netErr.Temporary()})
 		} else {
-			e.encode(header{errorMsg, 0})
+			e.encode(header{MsgType: errorT})
 			e.encode(err.Error())
 		}
 		e.mn.closeConn()
 	}()
 
-	e.encode(header{helloMsg, 0})
+	e.encode(header{MsgType: helloT})
+	e.encode(hello{})
 	for {
 		if e.err != nil {
 			go e.mn.ShutDownWith(err)
 			return e.err
 		}
 		select {
-		case elem := <-e.elemCh:
-			switch {
-			case elem.name != nil:
-				e.encode(header{initElemMsg, 0})
-				e.encode(elem.name)
-			case !elem.ok:
-				e.encode(header{closeMsg, elem.id})
-				e.flush()
-			case elem.flush:
-				e.flush()
-			default:
-				e.encode(header{elemMsg, elem.id})
-				e.encodeVal(elem.val)
-			}
-
-		case cred := <-e.creditCh:
-			switch {
-			case cred.name != nil:
-				e.encode(header{initCredMsg, cred.id})
-				e.encode(cred.amount)
-				e.encode(cred.name)
-			default:
-				e.encode(header{creditMsg, cred.id})
-				e.encode(cred.amount)
-			}
-			e.flush()
-
 		case <-e.mn.ErrorSignal():
 			return e.mn.Error()
+
+		case msg := <-e.messages:
+			switch pay := msg.payload.(type) {
+			case *userData:
+				e.encode(header{userDataT, msg.name})
+				e.encodeVal(pay.val)
+			case *wantToSend:
+				e.encode(header{wantToSendT, msg.name})
+				e.encode(pay)
+			case *endOfStream:
+				e.encode(header{endOfStreamT, msg.name})
+				e.encode(pay)
+				// flush
+			case *credit:
+				e.encode(header{creditT, msg.name})
+				e.encode(pay)
+			case *initialCredit:
+				e.encode(header{initialCreditT, msg.name})
+				e.encode(pay)
+				// various flush cases for elements and credits
+			default:
+				panic("unexpected msg type")
+			}
 		}
 	}
 }
@@ -164,12 +158,12 @@ func (l *limitedReader) Read(p []byte) (n int, err error) {
 
 type typeTable struct {
 	sync.Mutex
-	t []reflect.Type
+	t map[hashedName]reflect.Type
 }
 
 type decoder struct {
-	toReceiver   chan<- element
-	toCredRecv   chan<- credit
+	toElemRtr    chan<- message
+	toCredRtr    chan<- message
 	types        typeTable // updated by elemRouter
 	mn           *Manager
 	msgSizeLimit int
@@ -189,8 +183,8 @@ func (d *decoder) decode(v interface{}) error {
 func (d *decoder) run() (err error) {
 	defer func() {
 		go d.mn.ShutDownWith(err)
-		close(d.toReceiver)
-		close(d.toCredRecv)
+		close(d.toElemRtr)
+		close(d.toCredRtr)
 	}()
 
 	var h header
@@ -198,8 +192,13 @@ func (d *decoder) run() (err error) {
 	if err != nil {
 		return
 	}
-	if h.MsgType != helloMsg {
+	if h.MsgType != helloT {
 		return fmtErr("expecting hello message, got MsgType %d", h.MsgType)
+	}
+	var hel hello
+	err = d.decode(&hel)
+	if err != nil {
+		return
 	}
 	for {
 		if err = d.mn.Error(); err != nil {
@@ -210,67 +209,69 @@ func (d *decoder) run() (err error) {
 		if err != nil {
 			return
 		}
-		if h.ChanID < 0 {
-			return errInvalidId
-		}
+		// if name is zero, keep the last one seen
 		switch h.MsgType {
-		case elemMsg:
-			elem := element{id: h.ChanID, ok: true}
+		case userDataT:
 			d.types.Lock()
-			if elem.id >= len(d.types.t) || d.types.t[elem.id] == nil {
+			typ, present := d.types.t[h.Name]
+			if !present {
 				d.types.Unlock()
 				return errInvalidId
 			}
-			elemType := d.types.t[elem.id]
 			d.types.Unlock()
-			elem.val = reflect.New(elemType).Elem()
-			err = d.decodeVal(elem.val)
+			data := new(userData)
+			data.val = reflect.New(typ).Elem()
+			err = d.decodeVal(data.val)
 			if err != nil {
 				return
 			}
-			d.toReceiver <- elem
+			d.toElemRtr <- message{h.Name, data}
 
-		case initElemMsg:
-			var name hashedName
-			err = d.decode(&name)
+		case wantToSendT:
+			panic("implement me")
+
+		case endOfStreamT:
+			eos := new(endOfStream)
+			err = d.decode(eos)
 			if err != nil {
 				return
 			}
-			// we don't do
+			d.toElemRtr <- message{h.Name, eos}
 
-		case closeMsg:
-			d.toReceiver <- element{id: h.ChanID, ok: false}
-
-		case creditMsg, initCredMsg:
-			cred := credit{id: h.ChanID}
-			err = d.decode(&cred.amount)
+		case creditT:
+			cred := new(credit)
+			err = d.decode(cred)
 			if err != nil {
 				return
 			}
-			if cred.amount <= 0 {
-				return newErr("credit with non-positive value received")
+			if cred.Amount < 0 {
+				return newErr("credit with negative value received")
 			}
-			if h.MsgType == initCredMsg {
-				cred.name = new(hashedName)
-				err = d.decode(cred.name)
-				if err != nil {
-					return
-				}
-			}
-			d.toCredRecv <- cred
+			d.toCredRtr <- message{h.Name, cred}
 
-		case errorMsg:
-			var errString string
-			err = d.decode(&errString)
+		case initialCreditT:
+			initCred := new(initialCredit)
+			err = d.decode(initCred)
 			if err != nil {
 				return
 			}
-			if errString == io.EOF.Error() {
+			if initCred.Amount < 0 {
+				return newErr("initial credit with negative value received")
+			}
+			d.toCredRtr <- message{h.Name, initCred}
+
+		case errorT:
+			var errStr string
+			err = d.decode(&errStr)
+			if err != nil {
+				return
+			}
+			if errStr == io.EOF.Error() {
 				return io.EOF
 			}
-			return errors.New("netchan, error from peer: " + errString)
+			return errors.New("netchan, error from peer: " + errStr)
 
-		case netErrorMsg:
+		case netErrorT:
 			netErr := new(netError)
 			err = d.decode(netErr)
 			if err != nil {
@@ -280,7 +281,7 @@ func (d *decoder) run() (err error) {
 			return netErr
 
 		default:
-			if h.MsgType == 0 || h.MsgType > lastReserved {
+			if h.MsgType <= 0 || h.MsgType > lastReservedT {
 				return fmtErr("received message with invalid type: %d", h.MsgType)
 			}
 		}

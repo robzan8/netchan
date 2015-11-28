@@ -5,24 +5,12 @@ import (
 	"sync"
 )
 
-type recvEntry struct {
-	name    hashedName
-	present bool
-	buffer  chan<- reflect.Value
-}
-
-type recvTable struct {
-	sync.Mutex
-	t []recvEntry
-}
-
 type receiver struct {
-	id          int
 	name        hashedName
 	buffer      <-chan reflect.Value
 	errorSignal <-chan struct{}
-	ch          reflect.Value
-	toEncoder   chan<- credit
+	dataChan    reflect.Value
+	toEncoder   chan<- message // credits
 	bufCap      int
 	received    int
 	errOccurred bool
@@ -30,7 +18,7 @@ type receiver struct {
 
 func (r *receiver) sendToUser(val reflect.Value) {
 	sendAndError := [2]reflect.SelectCase{
-		{Dir: reflect.SelectSend, Chan: r.ch, Send: val},
+		{Dir: reflect.SelectSend, Chan: r.dataChan, Send: val},
 		{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(r.errorSignal)},
 	}
 	i, _, _ := reflect.Select(sendAndError[:])
@@ -39,26 +27,28 @@ func (r *receiver) sendToUser(val reflect.Value) {
 	}
 }
 
-func (r *receiver) sendToEncoder(cred credit) {
+func (r *receiver) sendToEncoder(payload interface{}) {
+	msg := message{r.name, payload}
 	select {
-	case r.toEncoder <- cred:
+	case r.toEncoder <- msg:
 	case <-r.errorSignal:
 		r.errOccurred = true
 	}
 }
 
 func (r receiver) run() {
-	r.sendToEncoder(credit{r.id, r.bufCap, &r.name}) // initial credit
+	r.sendToEncoder(&initialCredit{r.bufCap})
 	for !r.errOccurred {
 		select {
 		case val, ok := <-r.buffer:
 			if !ok {
-				r.ch.Close()
+				r.dataChan.Close()
+				// elemRouter deletes the entry
 				return
 			}
 			r.received++
-			if r.received*2 >= r.bufCap { // i.e. received >= ceil(bufCap/2)
-				r.sendToEncoder(credit{r.id, r.received, nil})
+			if r.received == ceilDivide(r.bufCap, 2) {
+				r.sendToEncoder(&credit{r.received})
 				r.received = 0
 			}
 			r.sendToUser(val)
@@ -69,75 +59,51 @@ func (r receiver) run() {
 }
 
 type elemRouter struct {
-	elements  <-chan element // from decoder
-	toEncoder chan<- credit
-	table     recvTable
+	elements  <-chan message // from decoder
+	toEncoder chan<- message // credits
+	bufMu     sync.Mutex
+	buffers   map[hashedName]chan<- reflect.Value
 	types     *typeTable // decoder's
 	mn        *Manager
 }
 
 // Open a net-chan for receiving.
-func (r *elemRouter) open(name string, ch reflect.Value, bufCap int) error {
-	r.table.Lock()
-	defer r.table.Unlock()
+func (r *elemRouter) open(nameStr string, ch reflect.Value, bufCap int) error {
+	r.bufMu.Lock()
+	defer r.bufMu.Unlock()
 
-	hName := hashName(name)
-	id := len(r.table.t)
-	for i, entry := range r.table.t {
-		if entry.present && entry.name == hName {
-			return errAlreadyOpen("Recv", name)
-		}
-		if !entry.present && i < id {
-			id = i
-		}
+	name := hashName(nameStr)
+	_, present := r.buffers[name]
+	if present {
+		return errAlreadyOpen("Recv", nameStr)
 	}
 
 	r.types.Lock()
 	defer r.types.Unlock()
 
-	if id == len(r.table.t) {
-		r.table.t = append(r.table.t, recvEntry{})
-		r.types.t = append(r.types.t, nil)
-	}
 	buffer := make(chan reflect.Value, bufCap)
-	r.table.t[id] = recvEntry{hName, true, buffer}
-	r.types.t[id] = ch.Type().Elem()
+	r.buffers[name] = buffer
+	r.types.t[name] = ch.Type().Elem()
 
-	go receiver{id, hName, buffer, r.mn.ErrorSignal(),
+	go receiver{name, buffer, r.mn.ErrorSignal(),
 		ch, r.toEncoder, bufCap, 0, false}.run()
 	return nil
 }
 
 // Got an element from the decoder.
 // WARNING: we are not handling initElemMsg
-func (r *elemRouter) handleElem(elem element) error {
-	r.table.Lock()
-	// these checks done already by decoder?
-	if elem.id >= len(r.table.t) {
-		r.table.Unlock()
-		return errInvalidId
+// if data is nil, we got endOfStream
+func (r *elemRouter) handleUserData(name hashedName, data *userData) error {
+	r.bufMu.Lock()
+	buffer, present := r.buffers[name]
+	if !present {
+		r.bufMu.Unlock()
+		return newErr("data arrived for closed net-chan")
 	}
-	entry := &r.table.t[elem.id]
-	if !entry.present {
-		r.table.Unlock()
-		return newErr("element arrived for closed net-chan")
-	}
-	buffer := entry.buffer
-	if !elem.ok {
-		// net-chan closed, delete the entry.
-		r.types.Lock()
-		*entry = recvEntry{}
-		r.types.t[elem.id] = nil
-		r.types.Unlock()
-
-		r.table.Unlock()
-		close(buffer)
-		return nil
-	}
-	r.table.Unlock()
+	r.bufMu.Unlock()
 
 	select {
-	case buffer <- elem.val:
+	case buffer <- data.val:
 		return nil
 	default:
 		// Sending to the buffer should never be blocking.
@@ -145,9 +111,26 @@ func (r *elemRouter) handleElem(elem element) error {
 	}
 }
 
+func (r *elemRouter) handleEOS(name hashedName) error {
+	r.bufMu.Lock()
+	buffer, present := r.buffers[name]
+	if !present {
+		r.bufMu.Unlock()
+		return newErr("end of stream message arrived for closed net-chan")
+	}
+	r.types.Lock()
+	delete(r.buffers, name)
+	delete(r.types.t, name)
+	r.types.Unlock()
+	r.bufMu.Unlock()
+
+	close(buffer)
+	return nil
+}
+
 func (r *elemRouter) run() {
 	for {
-		elem, ok := <-r.elements
+		msg, ok := <-r.elements
 		if !ok {
 			// An error occurred and decoder shut down.
 			return
@@ -157,7 +140,16 @@ func (r *elemRouter) run() {
 			// keep draining bla bla
 			continue
 		}
-		err = r.handleElem(elem)
+
+		switch pay := msg.payload.(type) {
+		case *userData:
+			err = r.handleUserData(msg.name, pay)
+		case *endOfStream:
+			err = r.handleEOS(msg.name)
+		default:
+			panic("unexpected msg type")
+		}
+
 		if err != nil {
 			go r.mn.ShutDownWith(err)
 		}
