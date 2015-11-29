@@ -5,6 +5,11 @@ import (
 	"sync"
 )
 
+type recvTable struct {
+	sync.Mutex
+	m map[hashedName]chan<- reflect.Value
+}
+
 type receiver struct {
 	name        hashedName
 	buffer      <-chan reflect.Value
@@ -61,19 +66,18 @@ func (r receiver) run() {
 type elemRouter struct {
 	elements  <-chan message // from decoder
 	toEncoder chan<- message // credits
-	bufMu     sync.Mutex
-	buffers   map[hashedName]chan<- reflect.Value
+	table     recvTable
 	types     *typeTable // decoder's
 	mn        *Manager
 }
 
 // Open a net-chan for receiving.
 func (r *elemRouter) open(nameStr string, ch reflect.Value, bufCap int) error {
-	r.bufMu.Lock()
-	defer r.bufMu.Unlock()
+	r.table.Lock()
+	defer r.table.Unlock()
 
 	name := hashName(nameStr)
-	_, present := r.buffers[name]
+	_, present := r.table.m[name]
 	if present {
 		return errAlreadyOpen("Recv", nameStr)
 	}
@@ -82,8 +86,8 @@ func (r *elemRouter) open(nameStr string, ch reflect.Value, bufCap int) error {
 	defer r.types.Unlock()
 
 	buffer := make(chan reflect.Value, bufCap)
-	r.buffers[name] = buffer
-	r.types.t[name] = ch.Type().Elem()
+	r.table.m[name] = buffer
+	r.types.m[name] = ch.Type().Elem()
 
 	go receiver{name, buffer, r.mn.ErrorSignal(),
 		ch, r.toEncoder, bufCap, 0, false}.run()
@@ -94,13 +98,13 @@ func (r *elemRouter) open(nameStr string, ch reflect.Value, bufCap int) error {
 // WARNING: we are not handling initElemMsg
 // if data is nil, we got endOfStream
 func (r *elemRouter) handleUserData(name hashedName, data *userData) error {
-	r.bufMu.Lock()
-	buffer, present := r.buffers[name]
+	r.table.Lock()
+	buffer, present := r.table.m[name]
 	if !present {
-		r.bufMu.Unlock()
+		r.table.Unlock()
 		return newErr("data arrived for closed net-chan")
 	}
-	r.bufMu.Unlock()
+	r.table.Unlock()
 
 	select {
 	case buffer <- data.val:
@@ -112,17 +116,17 @@ func (r *elemRouter) handleUserData(name hashedName, data *userData) error {
 }
 
 func (r *elemRouter) handleEOS(name hashedName) error {
-	r.bufMu.Lock()
-	buffer, present := r.buffers[name]
+	r.table.Lock()
+	buffer, present := r.table.m[name]
 	if !present {
-		r.bufMu.Unlock()
+		r.table.Unlock()
 		return newErr("end of stream message arrived for closed net-chan")
 	}
 	r.types.Lock()
-	delete(r.buffers, name)
-	delete(r.types.t, name)
+	delete(r.table.m, name)
+	delete(r.types.m, name)
 	r.types.Unlock()
-	r.bufMu.Unlock()
+	r.table.Unlock()
 
 	close(buffer)
 	return nil

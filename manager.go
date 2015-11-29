@@ -150,7 +150,7 @@ func Manage(conn io.ReadWriteCloser, msgSizeLimit int) *Manager {
 	dec := &decoder{
 		toElemRtr:    elemRtrCh,
 		toCredRtr:    credRtrCh,
-		types:        typeTable{t: make(map[hashedName]reflect.Type)},
+		types:        typeTable{m: make(map[hashedName]reflect.Type)},
 		mn:           mn,
 		msgSizeLimit: msgSizeLimit,
 		limReader:    limitedReader{R: conn},
@@ -159,9 +159,9 @@ func Manage(conn io.ReadWriteCloser, msgSizeLimit int) *Manager {
 
 	*elemRtr = elemRouter{elements: elemRtrCh,
 		toEncoder: encCh, types: &dec.types, mn: mn}
-	elemRtr.buffers = make(map[hashedName]chan<- reflect.Value)
+	elemRtr.table.m = make(map[hashedName]chan<- reflect.Value)
 	*credRtr = credRouter{credits: credRtrCh, toEncoder: encCh, mn: mn}
-	credRtr.table.t = make(map[hashedName]*sendEntry)
+	credRtr.table.m = make(map[hashedName]*sendEntry)
 
 	go mn.elemRtr.run()
 	go mn.credRtr.run()

@@ -158,7 +158,7 @@ func (l *limitedReader) Read(p []byte) (n int, err error) {
 
 type typeTable struct {
 	sync.Mutex
-	t map[hashedName]reflect.Type
+	m map[hashedName]reflect.Type
 }
 
 type decoder struct {
@@ -213,7 +213,7 @@ func (d *decoder) run() (err error) {
 		switch h.MsgType {
 		case userDataT:
 			d.types.Lock()
-			typ, present := d.types.t[h.Name]
+			typ, present := d.types.m[h.Name]
 			if !present {
 				d.types.Unlock()
 				return errInvalidId

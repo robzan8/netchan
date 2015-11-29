@@ -3,7 +3,6 @@ package netchan
 import (
 	"reflect"
 	"sync"
-	"sync/atomic"
 )
 
 type sendEntry struct {
@@ -15,7 +14,7 @@ type sendEntry struct {
 
 type sendTable struct {
 	sync.Mutex
-	t map[hashedName]*sendEntry
+	m map[hashedName]*sendEntry
 }
 
 type sender struct {
@@ -79,7 +78,7 @@ func (s sender) run() {
 			if !ok {
 				s.sendToEncoder(&endOfStream{})
 				s.table.Lock()
-				delete(s.table.t, s.name)
+				delete(s.table.m, s.name)
 				s.table.Unlock()
 				return
 			}
@@ -111,7 +110,7 @@ type credRouter struct {
 	toEncoder chan<- message // elements
 	table     sendTable
 	mn        *Manager
-	halfOpen  int32
+	halfOpen  int
 }
 
 func (r *credRouter) startSender(name hashedName, entry *sendEntry) {
@@ -143,7 +142,7 @@ func (r *credRouter) open(nameStr string, ch reflect.Value) error {
 	defer r.table.Unlock()
 
 	name := hashName(nameStr)
-	entry, present := r.table.t[name]
+	entry, present := r.table.m[name]
 	if present {
 		// Initial credit already arrived.
 		if entry.dataChan != (reflect.Value{}) {
@@ -151,18 +150,18 @@ func (r *credRouter) open(nameStr string, ch reflect.Value) error {
 		}
 		entry.dataChan = ch
 		r.startSender(name, entry)
-		atomic.AddInt32(&r.halfOpen, -1)
+		r.halfOpen--
 		return nil
 	}
 	// Initial credit did not arrive yet.
-	r.table.t[name] = &sendEntry{dataChan: ch}
+	r.table.m[name] = &sendEntry{dataChan: ch}
 	return nil
 }
 
 // Got a credit from the decoder.
 func (r *credRouter) handleCred(name hashedName, cred *credit) error {
 	r.table.Lock()
-	entry, present := r.table.t[name]
+	entry, present := r.table.m[name]
 	if !present {
 		// It may happen that the entry is not present,
 		// because the channel has just been closed; no problem.
@@ -200,7 +199,7 @@ func (r *credRouter) handleInitCred(name hashedName, cred *initialCredit) error 
 	r.table.Lock()
 	defer r.table.Unlock()
 
-	entry, present := r.table.t[name]
+	entry, present := r.table.m[name]
 	if present {
 		// User already called Open(Send).
 		if entry.initCred != 0 {
@@ -211,11 +210,11 @@ func (r *credRouter) handleInitCred(name hashedName, cred *initialCredit) error 
 		return nil
 	}
 	// User didn't call Open(Send) yet.
-	halfOpen := atomic.AddInt32(&r.halfOpen, 1)
-	if halfOpen > maxHalfOpen {
+	r.halfOpen++
+	if r.halfOpen > maxHalfOpen {
 		return newErr("too many half open net-chans")
 	}
-	r.table.t[name] = &sendEntry{initCred: cred.Amount}
+	r.table.m[name] = &sendEntry{initCred: cred.Amount}
 	return nil
 }
 
