@@ -58,7 +58,6 @@ type NetchanFlusher interface {
 }
 
 type encoder struct {
-	mu       sync.Mutex
 	messages <-chan message
 	mn       *Manager
 	enc      *gob.Encoder
@@ -113,16 +112,21 @@ func (e *encoder) run() (err error) {
 
 		case msg := <-e.messages:
 			switch pay := msg.payload.(type) {
-			case *userData:
-				e.encode(header{userDataT, msg.name})
-				e.encodeVal(pay.val)
-			case *wantToSend:
-				e.encode(header{wantToSendT, msg.name})
-				e.encode(pay)
-			case *endOfStream:
-				e.encode(header{endOfStreamT, msg.name})
-				e.encode(pay)
-				// flush
+			case *[]interface{}:
+				for _, p := range *pay {
+					switch pay := p.(type) {
+					case *userData:
+						e.encode(header{userDataT, msg.name})
+						e.encodeVal(pay.val)
+					case *wantToSend:
+						e.encode(header{wantToSendT, msg.name})
+						e.encode(pay)
+					case *endOfStream:
+						e.encode(header{endOfStreamT, msg.name})
+						e.encode(pay)
+						// flush
+					}
+				}
 			case *credit:
 				e.encode(header{creditT, msg.name})
 				e.encode(pay)

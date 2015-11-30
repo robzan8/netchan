@@ -30,7 +30,7 @@ func newPipeConn() (sideA, sideB pipeConn) {
 // intProducer sends integers from 0 to n-1 on net-chan chName
 func intProducer(t *testing.T, mn *Manager, chName string, n int) {
 	go func() {
-		ch := make(chan int, 8)
+		ch := make(chan int, 15)
 		err := mn.OpenSend(chName, ch)
 		if err != nil {
 			log.Fatal(err)
@@ -84,6 +84,29 @@ func checkIntSlice(t *testing.T, s []int) {
 	}
 }
 
+// open many chans in both directions
+func TestManyChans(t *testing.T) {
+	sideA, sideB := newPipeConn()
+	manA := Manage(sideA, 0)
+	manB := Manage(sideB, 0)
+	var sliceChans [5]<-chan []int
+	for i := range sliceChans {
+		chName := "integers" + strconv.Itoa(i)
+		if i%2 == 0 {
+			// producer is sideA, consumer is sideB
+			intProducer(t, manA, chName, 400)
+			sliceChans[i] = intConsumer(t, manB, chName)
+		} else {
+			// producer is sideB, consumer is sideA
+			intProducer(t, manB, chName, 400)
+			sliceChans[i] = intConsumer(t, manA, chName)
+		}
+	}
+	for _, ch := range sliceChans {
+		checkIntSlice(t, <-ch)
+	}
+}
+
 // start the producer before the consumer
 func TestSendThenRecv(t *testing.T) {
 	sideA, sideB := newPipeConn()
@@ -100,29 +123,6 @@ func TestRecvThenSend(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 	intProducer(t, Manage(sideA, 0), "integers", 100)
 	checkIntSlice(t, <-sliceCh)
-}
-
-// open many chans in both directions
-func TestManyChans(t *testing.T) {
-	sideA, sideB := newPipeConn()
-	manA := Manage(sideA, 0)
-	manB := Manage(sideB, 0)
-	var sliceChans [100]<-chan []int
-	for i := range sliceChans {
-		chName := "integers" + strconv.Itoa(i)
-		if i%2 == 0 {
-			// producer is sideA, consumer is sideB
-			intProducer(t, manA, chName, 90)
-			sliceChans[i] = intConsumer(t, manB, chName)
-		} else {
-			// producer is sideB, consumer is sideA
-			intProducer(t, manB, chName, 90)
-			sliceChans[i] = intConsumer(t, manA, chName)
-		}
-	}
-	for _, ch := range sliceChans {
-		checkIntSlice(t, <-ch)
-	}
 }
 
 // send many integers on a net-chan with a small buffer. If the credit system is broken,
