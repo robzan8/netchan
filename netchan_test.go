@@ -4,7 +4,6 @@ import (
 	"io"
 	"log"
 	"strconv"
-	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -54,7 +53,7 @@ func intConsumer(t *testing.T, mn *Manager, chName string) <-chan []int {
 	go func() {
 		var slice []int
 		ch := make(chan int, 8)
-		err := mn.OpenRecv(chName, ch, 100)
+		err := mn.OpenRecv(chName, ch, 60)
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -85,6 +84,24 @@ func checkIntSlice(t *testing.T, s []int) {
 	}
 }
 
+// start the producer before the consumer
+func TestSendThenRecv(t *testing.T) {
+	sideA, sideB := newPipeConn()
+	intProducer(t, Manage(sideA, 0), "integers", 100)
+	time.Sleep(50 * time.Millisecond)
+	s := <-intConsumer(t, Manage(sideB, 0), "integers")
+	checkIntSlice(t, s)
+}
+
+// start the consumer before the producer
+func TestRecvThenSend(t *testing.T) {
+	sideA, sideB := newPipeConn()
+	sliceCh := intConsumer(t, Manage(sideB, 0), "integers")
+	time.Sleep(50 * time.Millisecond)
+	intProducer(t, Manage(sideA, 0), "integers", 100)
+	checkIntSlice(t, <-sliceCh)
+}
+
 // open many chans in both directions
 func TestManyChans(t *testing.T) {
 	sideA, sideB := newPipeConn()
@@ -106,27 +123,6 @@ func TestManyChans(t *testing.T) {
 	for _, ch := range sliceChans {
 		checkIntSlice(t, <-ch)
 	}
-	sLen := atomic.LoadInt64(&stripesLen)
-	sNum := atomic.LoadInt64(&numStripes)
-	log.Fatalf("num elems: %d, num stripes: %d\navarage stripe len: %f", sLen, sNum, float64(sLen)/float64(sNum))
-}
-
-// start the producer before the consumer
-func TestSendThenRecv(t *testing.T) {
-	sideA, sideB := newPipeConn()
-	intProducer(t, Manage(sideA, 0), "integers", 100)
-	time.Sleep(50 * time.Millisecond)
-	s := <-intConsumer(t, Manage(sideB, 0), "integers")
-	checkIntSlice(t, s)
-}
-
-// start the consumer before the producer
-func TestRecvThenSend(t *testing.T) {
-	sideA, sideB := newPipeConn()
-	sliceCh := intConsumer(t, Manage(sideB, 0), "integers")
-	time.Sleep(50 * time.Millisecond)
-	intProducer(t, Manage(sideA, 0), "integers", 100)
-	checkIntSlice(t, <-sliceCh)
 }
 
 // send many integers on a net-chan with a small buffer. If the credit system is broken,
