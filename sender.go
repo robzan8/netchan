@@ -3,7 +3,10 @@ package netchan
 import (
 	"reflect"
 	"sync"
+	"sync/atomic"
 )
+
+var stripesLen, numStripes int64
 
 type sendEntry struct {
 	dataChan reflect.Value
@@ -80,7 +83,12 @@ const stripeLen int = 15
 func (s *sender) handleDataStripe(val reflect.Value, ok bool) (exit bool) {
 	stripe := new([]interface{})
 	*stripe = make([]interface{}, 0, stripeLen)
-	defer s.sendToEncoder(stripe)
+	defer func() {
+		atomic.AddInt64(&stripesLen, int64(len(*stripe)))
+		s.sendToEncoder(stripe)
+	}()
+
+	atomic.AddInt64(&numStripes, 1)
 
 	exit = s.handleData(val, ok, stripe)
 	if exit {

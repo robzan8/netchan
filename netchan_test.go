@@ -4,6 +4,7 @@ import (
 	"io"
 	"log"
 	"strconv"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -53,7 +54,7 @@ func intConsumer(t *testing.T, mn *Manager, chName string) <-chan []int {
 	go func() {
 		var slice []int
 		ch := make(chan int, 8)
-		err := mn.OpenRecv(chName, ch, 8)
+		err := mn.OpenRecv(chName, ch, 100)
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -89,7 +90,7 @@ func TestManyChans(t *testing.T) {
 	sideA, sideB := newPipeConn()
 	manA := Manage(sideA, 0)
 	manB := Manage(sideB, 0)
-	var sliceChans [5]<-chan []int
+	var sliceChans [100]<-chan []int
 	for i := range sliceChans {
 		chName := "integers" + strconv.Itoa(i)
 		if i%2 == 0 {
@@ -105,6 +106,9 @@ func TestManyChans(t *testing.T) {
 	for _, ch := range sliceChans {
 		checkIntSlice(t, <-ch)
 	}
+	sLen := atomic.LoadInt64(&stripesLen)
+	sNum := atomic.LoadInt64(&numStripes)
+	log.Fatalf("num elems: %d, num stripes: %d\navarage stripe len: %f", sLen, sNum, float64(sLen)/float64(sNum))
 }
 
 // start the producer before the consumer
