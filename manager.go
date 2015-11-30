@@ -4,10 +4,8 @@ package netchan
 - more tests
 - fuzzy testing
 - we are not sending/handling initElemMsg
-- transmit gob structs for protocol extensibility?
-----do one single write for each netchan message
-- rename routers
-- check if branch timers does something more than master
+- transmit user data batched? use internal buffer for sending?
+- implement flushing
 
 performance:
 - profile time and memory
