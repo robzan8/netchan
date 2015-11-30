@@ -31,7 +31,7 @@ const (
 // preceedes every message
 type header struct {
 	MsgType int
-	Name    hashedName
+	Name    *hashedName // https://github.com/golang/go/issues/13378
 }
 
 // used to transmit errors that implement net.Error
@@ -101,6 +101,7 @@ func (e *encoder) run() (err error) {
 
 	e.encode(header{MsgType: helloT})
 	e.encode(hello{})
+	var lastName hashedName
 	for {
 		if e.err != nil {
 			go e.mn.ShutDownWith(err)
@@ -111,27 +112,32 @@ func (e *encoder) run() (err error) {
 			return e.mn.Error()
 
 		case msg := <-e.messages:
+			var name *hashedName
+			if msg.name != lastName {
+				lastName = msg.name
+				name = &lastName
+			}
 			switch pay := msg.payload.(type) {
 			case *[]interface{}:
 				for _, p := range *pay {
 					switch pay := p.(type) {
 					case *userData:
-						e.encode(header{userDataT, msg.name})
+						e.encode(header{userDataT, name})
 						e.encodeVal(pay.val)
 					case *wantToSend:
-						e.encode(header{wantToSendT, msg.name})
+						e.encode(header{wantToSendT, name})
 						e.encode(pay)
 					case *endOfStream:
-						e.encode(header{endOfStreamT, msg.name})
+						e.encode(header{endOfStreamT, name})
 						e.encode(pay)
 						// flush
 					}
 				}
 			case *credit:
-				e.encode(header{creditT, msg.name})
+				e.encode(header{creditT, name})
 				e.encode(pay)
 			case *initialCredit:
-				e.encode(header{initialCreditT, msg.name})
+				e.encode(header{initialCreditT, name})
 				e.encode(pay)
 				// various flush cases for elements and credits
 			default:
@@ -205,6 +211,7 @@ func (d *decoder) run() (err error) {
 	if err != nil {
 		return
 	}
+	var currName hashedName
 	for {
 		if err = d.mn.Error(); err != nil {
 			return
@@ -214,11 +221,13 @@ func (d *decoder) run() (err error) {
 		if err != nil {
 			return
 		}
-		// if name is zero, keep the last one seen
+		if h.Name != nil {
+			currName = *h.Name
+		}
 		switch h.MsgType {
 		case userDataT:
 			d.types.Lock()
-			typ, present := d.types.m[h.Name]
+			typ, present := d.types.m[currName]
 			if !present {
 				d.types.Unlock()
 				return errInvalidId
@@ -230,7 +239,7 @@ func (d *decoder) run() (err error) {
 			if err != nil {
 				return
 			}
-			d.toElemRtr <- message{h.Name, data}
+			d.toElemRtr <- message{currName, data}
 
 		case wantToSendT:
 			panic("implement me")
@@ -241,7 +250,7 @@ func (d *decoder) run() (err error) {
 			if err != nil {
 				return
 			}
-			d.toElemRtr <- message{h.Name, eos}
+			d.toElemRtr <- message{currName, eos}
 
 		case creditT:
 			cred := new(credit)
@@ -252,7 +261,7 @@ func (d *decoder) run() (err error) {
 			if cred.Amount < 0 {
 				return newErr("credit with negative value received")
 			}
-			d.toCredRtr <- message{h.Name, cred}
+			d.toCredRtr <- message{currName, cred}
 
 		case initialCreditT:
 			initCred := new(initialCredit)
@@ -263,7 +272,7 @@ func (d *decoder) run() (err error) {
 			if initCred.Amount <= 0 {
 				return newErr("initial credit with non-positive value received")
 			}
-			d.toCredRtr <- message{h.Name, initCred}
+			d.toCredRtr <- message{currName, initCred}
 
 		case errorT:
 			var errStr string
