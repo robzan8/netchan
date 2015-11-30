@@ -37,9 +37,9 @@ type wantToSend struct{}
 
 type flush struct{}
 
-type wantToFlush1 struct{}
+type wantToFlush0 struct{}
 
-type wantToFlush2 struct{}
+type wantToFlush1 struct{}
 
 type endOfStream struct{}
 

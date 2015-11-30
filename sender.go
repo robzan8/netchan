@@ -22,14 +22,14 @@ type sender struct {
 	dataChan    reflect.Value
 	credits     <-chan int
 	errorSignal <-chan struct{}
+	encMu       *sync.Mutex
 	toEncoder   chan<- message
 	quit        chan<- struct{}
 	table       *sendTable // table of the credit router
 	credit      int
-	errOccurred bool
 }
 
-func (s *sender) sendToEncoder(payload interface{}) {
+func (s *sender) sendToEncoder(payload interface{}) (exit bool) {
 	msg := message{s.name, payload}
 	// Simply sending to the encoder leads to deadlocks,
 	// keep processing credits
@@ -40,17 +40,82 @@ func (s *sender) sendToEncoder(payload interface{}) {
 		case cred := <-s.credits:
 			s.credit += cred
 		case <-s.errorSignal:
-			s.errOccurred = true
+			exit = true
 			return
 		}
 	}
+}
+
+// (val, ok) was received from the data channel
+func (s *sender) handleData(val reflect.Value, ok bool) (exit bool) {
+	// check exit when calling sendToEncoder
+	if !ok {
+		s.sendToEncoder(&endOfStream{})
+		s.table.Lock()
+		delete(s.table.m, s.name)
+		s.table.Unlock()
+		exit = true
+		return
+	}
+	/*f, fOk := val.Interface().(NetchanFlusher)
+	if fOk && f.NetchanFlush() {
+		s.sendToEncoder(&flush{})
+		return
+	}*/
+	s.sendToEncoder(&userData{val})
+	s.credit--
+	/*sent++
+	if sent == ceilDivide(recvCap, 4) || sent == ceilDivide(recvCap*3, 4) {
+		s.sendToEncoder(&wantToFlush0{})
+	}
+	// no else here
+	if sent == ceilDivide(recvCap, 2) || sent == recvCap {
+		s.sendToEncoder(&wantToFlush1{})
+	}
+	sent = sent % recvCap*/
+	return
+}
+
+const stripeLen int = 10
+
+func (s *sender) handleDataStripe(val reflect.Value, ok bool) (exit bool) {
+	s.encMu.Lock()
+	defer s.encMu.Unlock()
+
+	exit = s.handleData(val, ok)
+	if exit {
+		return
+	}
+	recvDataDefault := [2]reflect.SelectCase{
+		{Dir: reflect.SelectRecv, Chan: s.dataChan},
+		{Dir: reflect.SelectDefault},
+	}
+	const (
+		recvData int = iota
+		noMoreData
+	)
+	for i := 0; i < stripeLen-1 && s.credit > 0; i++ {
+		caseI, val, ok := reflect.Select(recvDataDefault[:])
+		switch caseI {
+		case recvData:
+			exit = s.handleData(val, ok)
+			if exit {
+				return
+			}
+		case noMoreData:
+			return
+		}
+	}
+	return
 }
 
 // TODO: send initElemMsg?
 func (s sender) run() {
 	defer close(s.quit)
 
-	recvSomething := [...]reflect.SelectCase{
+	//recvCap := s.credit // capacity of the receive buffer is initial credit
+	//sent := 0
+	recvSomething := [3]reflect.SelectCase{
 		{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(s.credits)},
 		{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(s.errorSignal)},
 		{Dir: reflect.SelectRecv, Chan: s.dataChan},
@@ -60,7 +125,7 @@ func (s sender) run() {
 		recvError
 		recvData
 	)
-	for !s.errOccurred {
+	for {
 		// If no credit, do not receive from user channel (third case).
 		var numCases int
 		if s.credit > 0 {
@@ -68,45 +133,24 @@ func (s sender) run() {
 		} else {
 			numCases = 2
 		}
-		i, val, ok := reflect.Select(recvSomething[0:numCases])
-		switch i {
+		caseI, val, ok := reflect.Select(recvSomething[0:numCases])
+		switch caseI {
 		case recvCredit:
 			s.credit += val.Interface().(int)
 		case recvError:
 			return
 		case recvData:
-			if !ok {
-				s.sendToEncoder(&endOfStream{})
-				s.table.Lock()
-				delete(s.table.m, s.name)
-				s.table.Unlock()
+			exit := s.handleDataStripe(val, ok)
+			if exit {
 				return
 			}
-			/*f, fOk := val.Interface().(NetchanFlusher)
-			if fOk && f.NetchanFlush() {
-				s.sendToEncoder(element{flush: true})
-				continue
-			}*/
-			s.sendToEncoder(&userData{val})
-			s.credit--
-			/*if s.sent == ceilDivide(s.recvCap, 4) {
-				s.sendToEncoder(element{wantToFlush1: true})
-			}
-			if s.sent == ceilDivide(s.recvCap, 2) {
-				s.sendToEncoder(wantToFlush2)
-			}
-			if s.credit == 0 {
-				// If no credit, we don't receive from the user channel. Even if the user
-				// wants to issue a flush, we ignore it, the data never arrives to peer,
-				// peer doesn't send credit and user blocks. Flush preventively:
-				s.sendToEncoder(element{flush: true})
-			}*/
 		}
 	}
 }
 
 type credRouter struct {
 	credits   <-chan message // from decoder
+	encMu     *sync.Mutex
 	toEncoder chan<- message // elements
 	table     sendTable
 	mn        *Manager
@@ -121,7 +165,7 @@ func (r *credRouter) startSender(name hashedName, entry *sendEntry) {
 	entry.quit = quit
 
 	go sender{name, entry.dataChan, credits, r.mn.ErrorSignal(),
-		r.toEncoder, quit, &r.table, entry.initCred, false}.run()
+		r.encMu, r.toEncoder, quit, &r.table, entry.initCred}.run()
 	return
 }
 

@@ -157,10 +157,10 @@ func Manage(conn io.ReadWriteCloser, msgSizeLimit int) *Manager {
 	}
 	dec.dec = gob.NewDecoder(&dec.limReader)
 
-	*elemRtr = elemRouter{elements: elemRtrCh,
+	*elemRtr = elemRouter{elements: elemRtrCh, encMu: &enc.mu,
 		toEncoder: encCh, types: &dec.types, mn: mn}
 	elemRtr.table.m = make(map[hashedName]chan<- reflect.Value)
-	*credRtr = credRouter{credits: credRtrCh, toEncoder: encCh, mn: mn}
+	*credRtr = credRouter{credits: credRtrCh, encMu: &enc.mu, toEncoder: encCh, mn: mn}
 	credRtr.table.m = make(map[hashedName]*sendEntry)
 
 	go mn.elemRtr.run()

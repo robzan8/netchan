@@ -58,6 +58,7 @@ type NetchanFlusher interface {
 }
 
 type encoder struct {
+	mu       sync.Mutex
 	messages <-chan message
 	mn       *Manager
 	enc      *gob.Encoder

@@ -15,6 +15,7 @@ type receiver struct {
 	buffer      <-chan reflect.Value
 	errorSignal <-chan struct{}
 	dataChan    reflect.Value
+	encMu       *sync.Mutex
 	toEncoder   chan<- message // credits
 	bufCap      int
 	received    int
@@ -65,6 +66,7 @@ func (r receiver) run() {
 
 type elemRouter struct {
 	elements  <-chan message // from decoder
+	encMu     *sync.Mutex
 	toEncoder chan<- message // credits
 	table     recvTable
 	types     *typeTable // decoder's
@@ -90,7 +92,7 @@ func (r *elemRouter) open(nameStr string, ch reflect.Value, bufCap int) error {
 	r.types.m[name] = ch.Type().Elem()
 
 	go receiver{name, buffer, r.mn.ErrorSignal(),
-		ch, r.toEncoder, bufCap, 0, false}.run()
+		ch, r.encMu, r.toEncoder, bufCap, 0, false}.run()
 	return nil
 }
 
