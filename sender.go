@@ -46,7 +46,7 @@ func (s *sender) sendToEncoder(payload interface{}) (exit bool) {
 }
 
 // (val, ok) was received from the data channel
-func (s *sender) handleData(val reflect.Value, ok bool, stripe *[]interface{}) (exit bool) {
+func (s *sender) handleData(val reflect.Value, ok bool, batch reflect.Value) (exit bool) {
 	// check exit when calling sendToEncoder
 	if !ok {
 		*stripe = append(*stripe, &endOfStream{})

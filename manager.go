@@ -6,6 +6,12 @@ package netchan
 - we are not sending/handling initElemMsg
 - transmit user data batched? use internal buffer for sending?
 - implement flushing
+- some utility for debugging (logger?)
+
+- concile:
+	flushing
+	credits, receive buffer cap
+	batches, send buffer
 
 performance:
 - profile time and memory
