@@ -1,6 +1,7 @@
 package netchan
 
 import (
+	"bytes"
 	"encoding/gob"
 	"errors"
 	"io"
@@ -53,15 +54,59 @@ func (e *netError) Temporary() bool {
 	return e.IsTemporary
 }
 
-type NetchanFlusher interface {
-	NetchanFlush() bool
+type encWriter struct {
+	initialized bool
+	conn        io.Writer
+	bufs        [2]bytes.Buffer
+	freeBuf     int
+	toConn      chan *bytes.Buffer
+	connErr     chan error
+}
+
+func (w *encWriter) runConnWriter() {
+	for {
+		buf, ok := <-w.toConn
+		if !ok {
+			return
+		}
+		_, err := buf.WriteTo(w.conn)
+		buf.Reset()
+		w.connErr <- err
+	}
+}
+
+func (w *encWriter) Write(data []byte) (n int, err error) {
+	if !w.initialized {
+		w.initialized = true
+		// w.conn set from the outside
+		w.toConn = make(chan *bytes.Buffer, 1)
+		w.connErr = make(chan error, 1)
+		w.connErr <- nil
+		go w.runConnWriter()
+	}
+	err = <-w.connErr
+	if err != nil {
+		close(w.toConn)
+		return
+	}
+	buf := &w.bufs[w.freeBuf]
+	n, err = buf.Write(data)
+	if err != nil {
+		close(w.toConn)
+		return
+	}
+	if buf.Len() >= 4096 {
+		w.toConn <- &w.bufs[w.freeBuf]
+		// swap buffers
+		w.freeBuf = (w.freeBuf + 1) % 2
+	}
+	return
 }
 
 type encoder struct {
 	messages <-chan message
 	mn       *Manager
 	enc      *gob.Encoder
-	flushFn  func() error
 
 	err error
 }
@@ -77,13 +122,6 @@ func (e *encoder) encodeVal(v reflect.Value) {
 
 func (e *encoder) encode(v interface{}) {
 	e.encodeVal(reflect.ValueOf(v))
-}
-
-func (e *encoder) flush() {
-	if e.err != nil {
-		return
-	}
-	e.err = e.flushFn()
 }
 
 func (e *encoder) run() (err error) {

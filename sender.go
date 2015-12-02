@@ -46,7 +46,7 @@ func (s *sender) sendToEncoder(payload interface{}) (exit bool) {
 }
 
 // (val, ok) was received from the data channel
-func (s *sender) handleData(val reflect.Value, ok bool, batch reflect.Value) (exit bool) {
+func (s *sender) handleData(val reflect.Value, ok bool, stripe *[]interface{}) (exit bool) {
 	// check exit when calling sendToEncoder
 	if !ok {
 		*stripe = append(*stripe, &endOfStream{})
@@ -56,22 +56,8 @@ func (s *sender) handleData(val reflect.Value, ok bool, batch reflect.Value) (ex
 		exit = true
 		return
 	}
-	/*f, fOk := val.Interface().(NetchanFlusher)
-	if fOk && f.NetchanFlush() {
-		*stripe = append(*stripe, &flush{})
-		return
-	}*/
 	*stripe = append(*stripe, &userData{val})
 	s.credit--
-	/*sent++
-	if sent == ceilDivide(recvCap, 4) || sent == ceilDivide(recvCap*3, 4) {
-		s.sendToEncoder(&wantToFlush0{})
-	}
-	// no else here
-	if sent == ceilDivide(recvCap, 2) || sent == recvCap {
-		s.sendToEncoder(&wantToFlush1{})
-	}
-	sent = sent % recvCap*/
 	return
 }
 

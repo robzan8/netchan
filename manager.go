@@ -8,10 +8,11 @@ package netchan
 - implement flushing
 - some utility for debugging (logger?)
 
-- concile:
-	flushing
-	credits, receive buffer cap
-	batches, send buffer
+- do double buffering for encoding and decoding
+- do batches that auto-decide len based on things already in buffers
+- send batches as slices
+- send a credit for each batch
+- same signature for OpenRecv and OpenSend?
 
 performance:
 - profile time and memory
@@ -65,10 +66,6 @@ type Manager struct {
 
 	errOnce, closeOnce once
 	err, closeErr      error
-}
-
-type flusher interface {
-	Flush() error
 }
 
 /*
@@ -144,12 +141,6 @@ func Manage(conn io.ReadWriteCloser, msgSizeLimit int) *Manager {
 
 	enc := &encoder{messages: encCh, mn: mn}
 	enc.enc = gob.NewEncoder(conn)
-	/*f, ok := conn.(flusher)
-	if ok {
-		enc.flushFn = f.Flush
-	} else {
-		enc.flushFn = func() error { return nil }
-	}*/
 
 	dec := &decoder{
 		toElemRtr:    elemRtrCh,
