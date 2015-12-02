@@ -1,6 +1,7 @@
 package netchan
 
 import (
+	"bytes"
 	"encoding/gob"
 	"errors"
 	"io"
@@ -27,6 +28,59 @@ const (
 
 	lastReservedT = 15
 )
+
+type encWriter struct {
+	initialized bool
+	conn        io.Writer
+	bufs        [2]bytes.Buffer
+	freeBuf     int
+	toFlush     chan *bytes.Buffer
+	flushErr    chan error
+}
+
+func (w *encWriter) runConnWriter() {
+	for {
+		buf, ok := <-w.toFlush
+		if !ok {
+			return
+		}
+		_, err := buf.WriteTo(w.conn)
+		buf.Reset()
+		w.errChan <- err
+	}
+}
+
+func (w *encWriter) flush() {
+	w.toFlush <- &w.bufs[w.freeBuf]
+	// swap buffers
+	w.freeBuf = (w.freeBuf + 1) % 2
+}
+
+func (w *encWriter) Write(data []byte) (n int, err error) {
+	if !w.initialized {
+		w.initialized = true
+		// w.conn set from the outside
+		w.toFlush = make(chan *bytes.Buffer, 1)
+		w.flushErr = make(chan error, 1)
+		w.flushErr <- nil
+		go w.runConnWriter()
+	}
+	err = <-w.flushErr
+	if err != nil {
+		close(w.toFlush)
+		return
+	}
+	buf := &w.bufs[w.freeBuf]
+	n, err = buf.Write(data)
+	if err != nil {
+		close(w.toFlush)
+		return
+	}
+	if buf.Len() >= 4096 {
+		w.flush()
+	}
+	return
+}
 
 // preceedes every message
 type header struct {

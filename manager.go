@@ -8,6 +8,7 @@ package netchan
 - implement flushing
 
 performance:
+- overlap enc and dec with conn read/write?
 - profile time and memory
 - adjust ShutDown timeout
 */

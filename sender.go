@@ -45,44 +45,14 @@ func (s *sender) sendToEncoder(payload interface{}) (exit bool) {
 	}
 }
 
-// (val, ok) was received from the data channel
-func (s *sender) handleData(val reflect.Value, ok bool, stripe *[]interface{}) (exit bool) {
-	// check exit when calling sendToEncoder
-	if !ok {
-		*stripe = append(*stripe, &endOfStream{})
-		s.table.Lock()
-		delete(s.table.m, s.name)
-		s.table.Unlock()
-		exit = true
-		return
-	}
-	/*f, fOk := val.Interface().(NetchanFlusher)
-	if fOk && f.NetchanFlush() {
-		*stripe = append(*stripe, &flush{})
-		return
-	}*/
-	*stripe = append(*stripe, &userData{val})
-	s.credit--
-	/*sent++
-	if sent == ceilDivide(recvCap, 4) || sent == ceilDivide(recvCap*3, 4) {
-		s.sendToEncoder(&wantToFlush0{})
-	}
-	// no else here
-	if sent == ceilDivide(recvCap, 2) || sent == recvCap {
-		s.sendToEncoder(&wantToFlush1{})
-	}
-	sent = sent % recvCap*/
-	return
-}
+const batchLen int = 15
 
-const stripeLen int = 15
+func (s *sender) batchData(val reflect.Value, ok bool) (batch *[]interface{}, exit bool) {
+	batch = new([]interface{})
+	*batch = make([]interface{}, 0, batchLen)
+	defer s.sendToEncoder(batch)
 
-func (s *sender) handleDataStripe(val reflect.Value, ok bool) (exit bool) {
-	stripe := new([]interface{})
-	*stripe = make([]interface{}, 0, stripeLen)
-	defer s.sendToEncoder(stripe)
-
-	exit = s.handleData(val, ok, stripe)
+	exit = s.handleData(val, ok, batch)
 	if exit {
 		return
 	}
@@ -94,11 +64,11 @@ func (s *sender) handleDataStripe(val reflect.Value, ok bool) (exit bool) {
 		recvData int = iota
 		noMoreData
 	)
-	for i := 0; i < stripeLen-1 && s.credit > 0; i++ {
+	for i := 0; i < batchLen-1 && s.credit > 0; i++ {
 		caseI, val, ok := reflect.Select(recvDataDefault[:])
 		switch caseI {
 		case recvData:
-			exit = s.handleData(val, ok, stripe)
+			exit = s.handleData(val, ok, batch)
 			if exit {
 				return
 			}
@@ -113,6 +83,8 @@ func (s *sender) handleDataStripe(val reflect.Value, ok bool) (exit bool) {
 func (s sender) run() {
 	defer close(s.quit)
 
+	batch := new([]interface{})
+	*batch = make([]interface{}, 0, batchLen)
 	//recvCap := s.credit // capacity of the receive buffer is initial credit
 	//sent := 0
 	recvSomething := [3]reflect.SelectCase{
@@ -140,10 +112,36 @@ func (s sender) run() {
 		case recvError:
 			return
 		case recvData:
-			exit := s.handleDataStripe(val, ok)
-			if exit {
+			if !ok {
+				*batch = append(*batch, &endOfStream{})
+				s.table.Lock()
+				delete(s.table.m, s.name)
+				s.table.Unlock()
+				s.sendToEncoder(batch)
 				return
 			}
+			/*f, fOk := val.Interface().(NetchanFlusher)
+			if fOk && f.NetchanFlush() {
+				*batch = append(*batch, &flush{})
+				s.sendToEncoder(batch)
+				// reset batch
+				continue
+			}*/
+			*batch = append(*batch, &userData{val})
+			s.credit--
+			if len(*batch) == batchLen {
+				s.sendToEncoder(batch)
+				batch = new([]interface{})
+			}
+			/*sent++
+			if sent == ceilDivide(recvCap, 4) || sent == ceilDivide(recvCap*3, 4) {
+				s.sendToEncoder(&wantToFlush0{})
+			}
+			// no else here
+			if sent == ceilDivide(recvCap, 2) || sent == recvCap {
+				s.sendToEncoder(&wantToFlush1{})
+			}
+			sent = sent % recvCap*/
 		}
 	}
 }
