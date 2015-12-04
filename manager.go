@@ -3,19 +3,20 @@ package netchan
 /* TODO:
 - more tests
 - fuzzy testing
-- we are not sending/handling initElemMsg
-- transmit user data batched? use internal buffer for sending?
-- implement flushing
 - some utility for debugging (logger?)
 
 - do double buffering for encoding and decoding
+- expose enc/dec buffer size in the API?
 - do batches that auto-decide len based on things already in buffers
 - send batches as slices
 - send a credit for each batch
 - same signature for OpenRecv and OpenSend?
+- header (and credits?) raw encoding?
+- int id?
 
 performance:
 - profile time and memory
+- multisig worth it?
 - adjust ShutDown timeout
 */
 
@@ -122,7 +123,11 @@ the peer and closes the connection.
 // messages that will be accepted from the connection. If msgSizeLimit is 0 or negative,
 // the default will be used. When a too big message is received, an error is signaled on
 // this manager and the manager shuts down.
-func Manage(conn io.ReadWriteCloser, msgSizeLimit int) *Manager {
+func Manage(conn io.ReadWriteCloser) *Manager {
+	return NewManager(conn, defMsgSizeLimit, defBufferSize)
+}
+
+func NewManager(conn io.ReadWriteCloser, bufferSize int, msgSizeLimit int) *Manager {
 	if msgSizeLimit <= 0 {
 		msgSizeLimit = 16 * 1024
 	}

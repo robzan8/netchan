@@ -45,50 +45,36 @@ func (s *sender) sendToEncoder(payload interface{}) (exit bool) {
 	}
 }
 
-// (val, ok) was received from the data channel
-func (s *sender) handleData(val reflect.Value, ok bool, stripe *[]interface{}) (exit bool) {
-	// check exit when calling sendToEncoder
-	if !ok {
-		*stripe = append(*stripe, &endOfStream{})
-		s.table.Lock()
-		delete(s.table.m, s.name)
-		s.table.Unlock()
-		exit = true
-		return
-	}
-	*stripe = append(*stripe, &userData{val})
-	s.credit--
-	return
+func (s *sender) closeChan() {
+	s.sendToEncoder(&endOfStream{})
+	s.table.Lock()
+	delete(s.table.m, s.name)
+	s.table.Unlock()
 }
 
-const stripeLen int = 15
-
-func (s *sender) handleDataStripe(val reflect.Value, ok bool) (exit bool) {
-	stripe := new([]interface{})
-	*stripe = make([]interface{}, 0, stripeLen)
-	defer s.sendToEncoder(stripe)
-
-	exit = s.handleData(val, ok, stripe)
-	if exit {
-		return
-	}
+func (s *sender) fillAndSend(batch reflect.Value) (exit bool) {
 	recvDataDefault := [2]reflect.SelectCase{
 		{Dir: reflect.SelectRecv, Chan: s.dataChan},
 		{Dir: reflect.SelectDefault},
 	}
 	const (
 		recvData int = iota
-		noMoreData
+		noDataNow
 	)
-	for i := 0; i < stripeLen-1 && s.credit > 0; i++ {
+	maxNumItems := s.dataChan.Cap() - 1
+	for i := 0; i < maxNumItems && s.credit > 0; i++ {
 		caseI, val, ok := reflect.Select(recvDataDefault[:])
 		switch caseI {
 		case recvData:
-			exit = s.handleData(val, ok, stripe)
-			if exit {
+			if !ok {
+				s.sendToEncoder(batch.Interface())
+				s.closeChan()
+				exit = true
 				return
 			}
-		case noMoreData:
+			batch = reflect.Append(batch, val)
+			s.credit--
+		case noDataNow:
 			return
 		}
 	}
@@ -99,8 +85,6 @@ func (s *sender) handleDataStripe(val reflect.Value, ok bool) (exit bool) {
 func (s sender) run() {
 	defer close(s.quit)
 
-	//recvCap := s.credit // capacity of the receive buffer is initial credit
-	//sent := 0
 	recvSomething := [3]reflect.SelectCase{
 		{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(s.credits)},
 		{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(s.errorSignal)},
@@ -126,10 +110,18 @@ func (s sender) run() {
 		case recvError:
 			return
 		case recvData:
-			exit := s.handleDataStripe(val, ok)
+			if !ok {
+				s.closeChan()
+				return
+			}
+			maxBatchLen := s.dataChan.Cap()
+			batch := reflect.MakeSlice(reflect.SliceOf(val.Type()), 0, maxBatchLen/2)
+			batch = reflect.Append(batch, val)
+			exit := s.fillAndSend(batch)
 			if exit {
 				return
 			}
+			// call Gosched here?
 		}
 	}
 }
