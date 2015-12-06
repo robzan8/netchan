@@ -3,6 +3,7 @@ package netchan
 import (
 	"reflect"
 	"sync"
+	"sync/atomic"
 )
 
 type sendEntry struct {
@@ -14,76 +15,79 @@ type sendEntry struct {
 
 type sendTable struct {
 	sync.Mutex
-	m map[hashedName]*sendEntry
+	id map[hashedName]int
+	m  map[int]*sendEntry
 }
 
 type sender struct {
-	name        hashedName
+	id          int
 	dataChan    reflect.Value
 	credits     <-chan int
 	errorSignal <-chan struct{}
-	toEncoder   chan<- message
+	toEncoder   chan<- userData
 	quit        chan<- struct{}
 	table       *sendTable // table of the credit router
 	credit      int
+
+	batchList chan reflect.Value
+	batchLen  int32
 }
 
-func (s *sender) sendToEncoder(payload interface{}) (exit bool) {
-	msg := message{s.name, payload}
+func (s *sender) sendToEncoder(batch reflect.Value, eos bool) (err bool) {
+	data := userData{s, batch, eos}
 	// Simply sending to the encoder leads to deadlocks,
 	// keep processing credits
 	for {
 		select {
-		case s.toEncoder <- msg:
+		case s.toEncoder <- data:
 			return
 		case cred := <-s.credits:
 			s.credit += cred
 		case <-s.errorSignal:
-			exit = true
+			err = true
 			return
 		}
 	}
 }
 
-func (s *sender) closeChan() {
-	s.sendToEncoder(&endOfStream{})
-	s.table.Lock()
-	delete(s.table.m, s.name)
-	s.table.Unlock()
-}
-
-func (s *sender) fillAndSend(batch reflect.Value) (exit bool) {
+func (s *sender) fillBatch(batch reflect.Value) (newBatch reflect.Value, eos bool) {
 	recvDataDefault := [2]reflect.SelectCase{
 		{Dir: reflect.SelectRecv, Chan: s.dataChan},
 		{Dir: reflect.SelectDefault},
 	}
 	const (
 		recvData int = iota
-		noDataNow
+		emptyChan
 	)
-	maxNumItems := s.dataChan.Cap() - 1
-	for i := 0; i < maxNumItems && s.credit > 0; i++ {
+	newBatch = batch
+	toRead := int(atomic.LoadInt32(&s.batchLen)) - 1 // batch already contains one value
+	for i := 0; i < toRead && s.credit > 0; i++ {
 		caseI, val, ok := reflect.Select(recvDataDefault[:])
 		switch caseI {
 		case recvData:
 			if !ok {
-				s.sendToEncoder(batch.Interface())
-				s.closeChan()
-				exit = true
+				eos = true
 				return
 			}
-			batch = reflect.Append(batch, val)
+			newBatch = reflect.Append(newBatch, val)
 			s.credit--
-		case noDataNow:
+		case emptyChan:
 			return
 		}
 	}
 	return
 }
 
-// TODO: send initElemMsg?
-func (s sender) run() {
+func (s *sender) run() {
 	defer close(s.quit)
+
+	// at most cap(s.toEncoder)+2 batches are around simultaneously, cap(s.toEncoder)
+	// in the buffer and other two being processed in the sender and encoder goroutines
+	s.batchList = make(chan reflect.Value, cap(s.toEncoder)+2)
+	for i := 0; i < cap(s.batchList); i++ {
+		s.batchList <- reflect.MakeSlice(reflect.SliceOf(s.dataChan.Type().Elem()), 0, 1)
+	}
+	s.batchLen = 1
 
 	recvSomething := [3]reflect.SelectCase{
 		{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(s.credits)},
@@ -111,14 +115,23 @@ func (s sender) run() {
 			return
 		case recvData:
 			if !ok {
-				s.closeChan()
+				s.sendToEncoder(reflect.Value{}, true)
+				s.table.Lock()
+				delete(s.table.m, s.name)
+				s.table.Unlock()
 				return
 			}
-			maxBatchLen := s.dataChan.Cap()
-			batch := reflect.MakeSlice(reflect.SliceOf(val.Type()), 0, maxBatchLen/2)
-			batch = reflect.Append(batch, val)
-			exit := s.fillAndSend(batch)
-			if exit {
+			batch := (<-s.batchList).Slice(0, 1)
+			batch.Index(0).Set(val)
+			batch, eos := s.fillBatch(batch)
+			err := s.sendToEncoder(batch, eos)
+			if eos {
+				s.table.Lock()
+				delete(s.table.m, s.name)
+				s.table.Unlock()
+				return
+			}
+			if err {
 				return
 			}
 			// call Gosched here?

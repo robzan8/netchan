@@ -30,7 +30,9 @@ type message struct {
 type hello struct{}
 
 type userData struct {
-	val reflect.Value
+	sendr       *sender
+	batch       reflect.Value
+	endOfStream bool
 }
 
 type wantToSend struct{}
