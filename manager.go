@@ -21,6 +21,7 @@ performance:
 */
 
 import (
+	"bufio"
 	"encoding/gob"
 	"io"
 	"reflect"
@@ -127,7 +128,12 @@ func Manage(conn io.ReadWriteCloser) *Manager {
 	return NewManager(conn, defMsgSizeLimit, defBufferSize)
 }
 
-func NewManager(conn io.ReadWriteCloser, bufferSize int, msgSizeLimit int) *Manager {
+type bufWriter interface {
+	io.Writer
+	Flush() error
+}
+
+func NewManager(conn io.ReadWriteCloser, msgSizeLimit int) *Manager {
 	if msgSizeLimit <= 0 {
 		msgSizeLimit = 16 * 1024
 	}
@@ -142,10 +148,16 @@ func NewManager(conn io.ReadWriteCloser, bufferSize int, msgSizeLimit int) *Mana
 	const chCap int = 0
 	elemRtrCh := make(chan message, chCap)
 	credRtrCh := make(chan message, chCap)
-	encCh := make(chan message, chCap)
+	encData := make(chan userData, chCap)
+	encCredits := make(chan credit, chCap)
 
-	enc := &encoder{messages: encCh, mn: mn}
-	enc.enc = gob.NewEncoder(conn)
+	enc := &encoder{dataCh: encData, credits: encCredits, mn: mn}
+	bw, ok := conn.(bufWriter)
+	if !ok {
+		bw = bufio.NewWriter(conn)
+	}
+	enc.enc = gob.NewEncoder(bw)
+	enc.flushFn = bw.Flush
 
 	dec := &decoder{
 		toElemRtr:    elemRtrCh,

@@ -28,13 +28,13 @@ type sender struct {
 	quit        chan<- struct{}
 	table       *sendTable // table of the credit router
 	credit      int
-
-	batchList chan reflect.Value
-	batchLen  int32
+	recvCap     int
+	batchList   chan reflect.Value
+	batchLen    int32
 }
 
-func (s *sender) sendToEncoder(batch reflect.Value, eos bool) (err bool) {
-	data := userData{s, batch, eos}
+func (s *sender) sendToEncoder(batch reflect.Value) (err bool) {
+	data := userData{s, batch}
 	// Simply sending to the encoder leads to deadlocks,
 	// keep processing credits
 	for {
@@ -50,7 +50,11 @@ func (s *sender) sendToEncoder(batch reflect.Value, eos bool) (err bool) {
 	}
 }
 
-func (s *sender) fillBatch(batch reflect.Value) (newBatch reflect.Value, eos bool) {
+// non eccedere recvBufCap/2?
+func (s *sender) createBatch(firstVal reflect.Value) (batch reflect.Value, eos bool) {
+	batch = (<-s.batchList).Slice(0, 1)
+	batch.Index(0).Set(firstVal)
+
 	recvDataDefault := [2]reflect.SelectCase{
 		{Dir: reflect.SelectRecv, Chan: s.dataChan},
 		{Dir: reflect.SelectDefault},
@@ -59,9 +63,8 @@ func (s *sender) fillBatch(batch reflect.Value) (newBatch reflect.Value, eos boo
 		recvData int = iota
 		emptyChan
 	)
-	newBatch = batch
-	toRead := int(atomic.LoadInt32(&s.batchLen)) - 1 // batch already contains one value
-	for i := 0; i < toRead && s.credit > 0; i++ {
+	numVals := int(atomic.LoadInt32(&s.batchLen))
+	for i := 1; i < numVals && s.credit > 0; i++ {
 		caseI, val, ok := reflect.Select(recvDataDefault[:])
 		switch caseI {
 		case recvData:
@@ -69,13 +72,20 @@ func (s *sender) fillBatch(batch reflect.Value) (newBatch reflect.Value, eos boo
 				eos = true
 				return
 			}
-			newBatch = reflect.Append(newBatch, val)
 			s.credit--
+			batch = reflect.Append(batch, val)
 		case emptyChan:
 			return
 		}
 	}
 	return
+}
+
+func (s *sender) chanClosed() {
+	s.sendToEncoder(reflect.Value{})
+	s.table.Lock()
+	delete(s.table.m, s.name)
+	s.table.Unlock()
 }
 
 func (s *sender) run() {
@@ -84,10 +94,10 @@ func (s *sender) run() {
 	// at most cap(s.toEncoder)+2 batches are around simultaneously, cap(s.toEncoder)
 	// in the buffer and other two being processed in the sender and encoder goroutines
 	s.batchList = make(chan reflect.Value, cap(s.toEncoder)+2)
+	sliceType := reflect.SliceOf(s.dataChan.Type().Elem())
 	for i := 0; i < cap(s.batchList); i++ {
-		s.batchList <- reflect.MakeSlice(reflect.SliceOf(s.dataChan.Type().Elem()), 0, 1)
+		s.batchList <- reflect.MakeSlice(sliceType, 0, 1)
 	}
-	s.batchLen = 1
 
 	recvSomething := [3]reflect.SelectCase{
 		{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(s.credits)},
@@ -115,20 +125,14 @@ func (s *sender) run() {
 			return
 		case recvData:
 			if !ok {
-				s.sendToEncoder(reflect.Value{}, true)
-				s.table.Lock()
-				delete(s.table.m, s.name)
-				s.table.Unlock()
+				s.chanClosed()
 				return
 			}
-			batch := (<-s.batchList).Slice(0, 1)
-			batch.Index(0).Set(val)
-			batch, eos := s.fillBatch(batch)
-			err := s.sendToEncoder(batch, eos)
+			s.credit--
+			batch, eos := s.createBatch(val)
+			err := s.sendToEncoder(batch)
 			if eos {
-				s.table.Lock()
-				delete(s.table.m, s.name)
-				s.table.Unlock()
+				s.chanClosed()
 				return
 			}
 			if err {
@@ -154,8 +158,8 @@ func (r *credRouter) startSender(name hashedName, entry *sendEntry) {
 	entry.credits = credits
 	entry.quit = quit
 
-	go sender{name, entry.dataChan, credits, r.mn.ErrorSignal(),
-		r.toEncoder, quit, &r.table, entry.initCred}.run()
+	go (&sender{name, entry.dataChan, credits, r.mn.ErrorSignal(), r.toEncoder,
+		quit, &r.table, entry.initCred, entry.initCred, nil, 1}).run()
 	return
 }
 
