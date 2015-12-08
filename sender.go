@@ -6,17 +6,21 @@ import (
 	"sync/atomic"
 )
 
-type sendEntry struct {
-	dataChan reflect.Value
+type senderChans struct {
+	credits chan<- int
+	quit    <-chan struct{}
+}
+
+type openInfo struct {
+	id       int
 	initCred int
-	credits  chan<- int
-	quit     <-chan struct{}
+	dataChan reflect.Value
 }
 
 type sendTable struct {
 	sync.Mutex
-	id map[hashedName]int
-	m  map[int]*sendEntry
+	chans map[int]senderChans
+	info  map[hashedName]openInfo
 }
 
 type sender struct {
@@ -55,28 +59,15 @@ func (s *sender) createBatch(firstVal reflect.Value) (batch reflect.Value, eos b
 	batch = (<-s.batchList).Slice(0, 1)
 	batch.Index(0).Set(firstVal)
 
-	recvDataDefault := [2]reflect.SelectCase{
-		{Dir: reflect.SelectRecv, Chan: s.dataChan},
-		{Dir: reflect.SelectDefault},
-	}
-	const (
-		recvData int = iota
-		emptyChan
-	)
 	numVals := int(atomic.LoadInt32(&s.batchLen))
 	for i := 1; i < numVals && s.credit > 0; i++ {
-		caseI, val, ok := reflect.Select(recvDataDefault[:])
-		switch caseI {
-		case recvData:
-			if !ok {
-				eos = true
-				return
-			}
-			s.credit--
-			batch = reflect.Append(batch, val)
-		case emptyChan:
+		val, ok := s.dataChan.TryRecv()
+		if !ok {
+			eos = val != reflect.Value{}
 			return
 		}
+		s.credit--
+		batch = reflect.Append(batch, val)
 	}
 	return
 }
@@ -144,23 +135,20 @@ func (s *sender) run() {
 }
 
 type credRouter struct {
-	credits   <-chan message // from decoder
-	toEncoder chan<- message // elements
+	credits   <-chan credit   // from decoder
+	toEncoder chan<- userData // elements
 	table     sendTable
 	mn        *Manager
-	halfOpen  int
 }
 
-func (r *credRouter) startSender(name hashedName, entry *sendEntry) {
+func (r *credRouter) startSender(info openInfo) {
 	credits := make(chan int)
 	quit := make(chan struct{})
+	// table is locked
+	r.table.chans[info.id] = senderChans{credits, quit}
 
-	entry.credits = credits
-	entry.quit = quit
-
-	go (&sender{name, entry.dataChan, credits, r.mn.ErrorSignal(), r.toEncoder,
-		quit, &r.table, entry.initCred, entry.initCred, nil, 1}).run()
-	return
+	go (&sender{info.id, info.dataChan, credits, r.mn.ErrorSignal(),
+		r.toEncoder, quit, &r.table, info.initCred, info.initCred, nil, 1}).run()
 }
 
 // Open a net-chan for sending.
@@ -180,43 +168,34 @@ func (r *credRouter) open(nameStr string, ch reflect.Value) error {
 	defer r.table.Unlock()
 
 	name := hashName(nameStr)
-	entry, present := r.table.m[name]
+	info, present := r.table.info[name]
 	if present {
 		// Initial credit already arrived.
-		if entry.dataChan != (reflect.Value{}) {
-			return errAlreadyOpen("Send", nameStr)
-		}
-		entry.dataChan = ch
-		r.startSender(name, entry)
-		r.halfOpen--
+		info.dataChan = ch
+		r.startSender(info)
+		delete(r.table.info, name)
 		return nil
 	}
 	// Initial credit did not arrive yet.
-	r.table.m[name] = &sendEntry{dataChan: ch}
+	r.table.info[name] = openInfo{dataChan: ch}
 	return nil
 }
 
 // Got a credit from the decoder.
-func (r *credRouter) handleCred(name hashedName, cred *credit) error {
+func (r *credRouter) handleCredit(cred credit) error {
 	r.table.Lock()
-	entry, present := r.table.m[name]
+	chans, present := r.table.chans[cred.id]
+	r.table.Unlock()
 	if !present {
 		// It may happen that the entry is not present,
-		// because the channel has just been closed; no problem.
-		r.table.Unlock()
+		// because the net-chan has just been closed; no problem.
 		return nil
 	}
-	toSender := entry.credits
-	quit := entry.quit
-	r.table.Unlock()
 
-	if toSender == nil {
-		return newErr("credit arrived for half-open net-chan")
-	}
 	// If it's not shutting down, the sender is always ready to receive credit.
 	select {
-	case toSender <- cred.Amount:
-	case <-quit: // net-chan closed or error occurred
+	case chans.credits <- cred.Amount:
+	case <-chans.quit: // net-chan closed or error occurred
 	}
 	return nil
 }
@@ -228,37 +207,29 @@ func (r *credRouter) handleCred(name hashedName, cred *credit) error {
 //     and we say that the net-chan is half-open, until the user calls Open(Send)
 //     locally. When we see too many half-open net-chans, we assume it's a "syn-flood"
 //     attack and shut down with an error.
-const (
-	maxHalfOpen = 256
-)
 
 // An initial credit arrived.
-func (r *credRouter) handleInitCred(name hashedName, cred *initialCredit) error {
+func (r *credRouter) handleInitCred(cred credit) error {
 	r.table.Lock()
 	defer r.table.Unlock()
 
-	entry, present := r.table.m[name]
+	info, present := r.table.info[*cred.Name]
 	if present {
 		// User already called Open(Send).
-		if entry.initCred != 0 {
-			return newErr("initial credit arrived for already open net-chan")
-		}
-		entry.initCred = cred.Amount
-		r.startSender(name, entry)
+		info.id = cred.id
+		info.initCred = cred.Amount
+		r.startSender(info)
+		delete(r.table.info, *cred.Name)
 		return nil
 	}
 	// User didn't call Open(Send) yet.
-	r.halfOpen++
-	if r.halfOpen > maxHalfOpen {
-		return newErr("too many half open net-chans")
-	}
-	r.table.m[name] = &sendEntry{initCred: cred.Amount}
+	r.table.info[*cred.Name] = openInfo{id: cred.id, initCred: cred.Amount}
 	return nil
 }
 
 func (r *credRouter) run() {
 	for {
-		msg, ok := <-r.credits
+		cred, ok := <-r.credits
 		if !ok {
 			// An error occurred and decoder shut down.
 			return
@@ -268,16 +239,11 @@ func (r *credRouter) run() {
 			// keep draining credits so that decoder doesn't block sending
 			continue
 		}
-
-		switch cred := msg.payload.(type) {
-		case *credit:
-			err = r.handleCred(msg.name, cred)
-		case *initialCredit:
-			err = r.handleInitCred(msg.name, cred)
-		default:
-			panic("unexpected msg type")
+		if cred.Name == nil {
+			err = r.handleCredit(cred)
+		} else {
+			err = r.handleInitCred(cred)
 		}
-
 		if err != nil {
 			go r.mn.ShutDownWith(err)
 		}

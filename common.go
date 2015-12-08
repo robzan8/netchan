@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"reflect"
 	"strconv"
+	"sync"
+	"sync/atomic"
 )
 
 // sha1-hashed name of a net-chan
@@ -25,7 +27,48 @@ type userData struct {
 type credit struct {
 	id     int
 	Amount int
-	Name   *hashedName // if non-nil, this is an initial credit
+	Name   *hashedName
+}
+
+var poolMu sync.Mutex
+var poolMap atomic.Value // map[reflect.Type]*sync.Pool
+
+func init() {
+	poolMap.Store(make(map[reflect.Type]*sync.Pool))
+}
+
+func getSlice(elemType reflect.Type) reflect.Value {
+	m := poolMap.Load().(map[reflect.Type]*sync.Pool)
+	pool, present := m[elemType]
+	if !present {
+		poolMu.Lock()
+		pool, present = m[elemType]
+		if !present {
+			newM := make(map[reflect.Type]*sync.Pool)
+			for k, v := range m {
+				newM[k] = v
+			}
+			pool = new(sync.Pool)
+			newM[elemType] = pool
+			poolMap.Store(newM)
+		}
+		poolMu.Unlock()
+	}
+	slicePt := pool.Get()
+	if slicePt != nil {
+		return reflect.ValueOf(slicePt).Elem()
+	}
+	typ := reflect.SliceOf(elemType)
+	slice := reflect.New(typ).Elem() // slices must be settable for gob decoding
+	slice.Set(reflect.MakeSlice(typ, 0, 1))
+	return slice
+}
+
+func putSlice(slice reflect.Value) {
+	elemType := slice.Type().Elem()
+	m := poolMap.Load().(map[reflect.Type]*sync.Pool)
+	// put pointer to slice to retain settability
+	m[elemType].Put(slice.Addr().Interface())
 }
 
 func newErr(str string) error {

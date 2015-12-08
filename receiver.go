@@ -7,18 +7,19 @@ import (
 
 type recvTable struct {
 	sync.Mutex
-	m map[hashedName]chan<- reflect.Value
+	buffer map[hashedName]chan<- interface{}
 }
 
 type receiver struct {
+	id          int
 	name        hashedName
-	buffer      <-chan reflect.Value
+	buffer      <-chan interface{}
 	errorSignal <-chan struct{}
 	dataChan    reflect.Value
 	toEncoder   chan<- message // credits
 	bufCap      int
 	received    int
-	errOccurred bool
+	err         bool
 }
 
 func (r *receiver) sendToUser(val reflect.Value) {
@@ -28,24 +29,23 @@ func (r *receiver) sendToUser(val reflect.Value) {
 	}
 	i, _, _ := reflect.Select(sendAndError[:])
 	if i == 1 { // errorSignal
-		r.errOccurred = true
+		r.err = true
 	}
 }
 
-func (r *receiver) sendToEncoder(payload interface{}) {
-	msg := message{r.name, payload}
+func (r *receiver) sendToEncoder(cred credit) {
 	select {
-	case r.toEncoder <- msg:
+	case r.toEncoder <- cred:
 	case <-r.errorSignal:
-		r.errOccurred = true
+		r.err = true
 	}
 }
 
 func (r receiver) run() {
-	r.sendToEncoder(&initialCredit{r.bufCap})
-	for !r.errOccurred {
+	r.sendToEncoder(credit{r.id, r.bufCap, &r.name}) // initial credit
+	for !r.err {
 		select {
-		case val, ok := <-r.buffer:
+		case batch, ok := <-r.buffer:
 			if !ok {
 				r.dataChan.Close()
 				// elemRouter deletes the entry
@@ -53,7 +53,7 @@ func (r receiver) run() {
 			}
 			r.received++
 			if r.received == ceilDivide(r.bufCap, 2) {
-				r.sendToEncoder(&credit{r.received})
+				r.sendToEncoder(&credit{r.id, r.received, nil})
 				r.received = 0
 			}
 			r.sendToUser(val)
@@ -69,6 +69,7 @@ type elemRouter struct {
 	table     recvTable
 	types     *typeTable // decoder's
 	mn        *Manager
+	newId     int
 }
 
 // Open a net-chan for receiving.
@@ -89,7 +90,8 @@ func (r *elemRouter) open(nameStr string, ch reflect.Value, bufCap int) error {
 	r.table.m[name] = buffer
 	r.types.m[name] = ch.Type().Elem()
 
-	go receiver{name, buffer, r.mn.ErrorSignal(),
+	r.newId++
+	go receiver{r.newId, name, buffer, r.mn.ErrorSignal(),
 		ch, r.toEncoder, bufCap, 0, false}.run()
 	return nil
 }
@@ -134,7 +136,7 @@ func (r *elemRouter) handleEOS(name hashedName) error {
 
 func (r *elemRouter) run() {
 	for {
-		msg, ok := <-r.elements
+		data, ok := <-r.elements
 		if !ok {
 			// An error occurred and decoder shut down.
 			return
