@@ -82,9 +82,8 @@ func (e *encoder) encodeData(data userData) {
 	}
 	e.encode(header{dataMsg, data.sendr.id})
 	e.encodeVal(data.batch)
-	// to avoid blocking the senders, encoder must put the batches
-	// back in the lists for as long as it keeps receiving from dataCh
-	data.sendr.batchList <- data.batch
+
+	data.pool.Put(data.batch.Addr().Interface())
 }
 
 func (e *encoder) bufAndFlush() {
@@ -160,15 +159,15 @@ func (l *limitedReader) Read(p []byte) (n int, err error) {
 	return
 }
 
-type batchTable struct {
+type poolMap struct {
 	sync.Mutex
-	m map[int]chan reflect.Value
+	m map[int]*sync.Pool
 }
 
 type decoder struct {
 	toElemRtr    chan<- userData
 	toCredRtr    chan<- credit
-	batches      batchTable // updated by elemRouter
+	pools        poolMap // updated by recvManager
 	mn           *Manager
 	msgSizeLimit int
 	limReader    limitedReader
@@ -216,18 +215,18 @@ func (d *decoder) run() (err error) {
 		}
 		switch h.MsgType {
 		case dataMsg:
-			d.batches.Lock()
-			batch, present := <-d.batches.m[h.Id]
+			d.pools.Lock()
+			pool, present := d.pools.m[h.Id]
+			d.pools.Unlock()
 			if !present {
-				d.batches.Unlock()
 				return errInvalidId
 			}
-			d.batches.Unlock()
+			batch := reflect.ValueOf(pool.Get()).Elem()
 			err = d.decodeVal(batch)
 			if err != nil {
 				return
 			}
-			d.toElemRtr <- userData{h.Id, batch}
+			d.toElemRtr <- userData{h.Id, batch, pool}
 
 		case closeMsg:
 			d.toElemRtr <- userData{h.Id, reflect.Value{}}
@@ -238,8 +237,8 @@ func (d *decoder) run() (err error) {
 			if err != nil {
 				return
 			}
-			if cred.Amount < 0 {
-				return newErr("credit with negative value received")
+			if cred.Amount <= 0 {
+				return newErr("credit with non-positive value received")
 			}
 			d.toCredRtr <- cred
 

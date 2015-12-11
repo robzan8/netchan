@@ -7,7 +7,6 @@ import (
 	"reflect"
 	"strconv"
 	"sync"
-	"sync/atomic"
 )
 
 // sha1-hashed name of a net-chan
@@ -22,6 +21,7 @@ type hello struct{}
 type userData struct {
 	id    int
 	batch reflect.Value // if zero, represents end of stream
+	pool  *sync.Pool
 }
 
 type credit struct {
@@ -30,45 +30,28 @@ type credit struct {
 	Name   *hashedName
 }
 
-var poolMu sync.Mutex
-var poolMap atomic.Value // map[reflect.Type]*sync.Pool
+var (
+	poolsMu    sync.Mutex
+	slicePools = make(map[reflect.Type]*sync.Pool)
+)
 
-func init() {
-	poolMap.Store(make(map[reflect.Type]*sync.Pool))
-}
+func slicePool(elemType reflect.Type) *sync.Pool {
+	poolsMu.Lock()
+	defer poolsMu.Unlock()
 
-func getSlice(elemType reflect.Type) reflect.Value {
-	m := poolMap.Load().(map[reflect.Type]*sync.Pool)
-	pool, present := m[elemType]
-	if !present {
-		poolMu.Lock()
-		pool, present = m[elemType]
-		if !present {
-			newM := make(map[reflect.Type]*sync.Pool)
-			for k, v := range m {
-				newM[k] = v
-			}
-			pool = new(sync.Pool)
-			newM[elemType] = pool
-			poolMap.Store(newM)
-		}
-		poolMu.Unlock()
+	pool, present := slicePools[elemType]
+	if present {
+		return pool
 	}
-	slicePt := pool.Get()
-	if slicePt != nil {
-		return reflect.ValueOf(slicePt).Elem()
+	pool = new(sync.Pool)
+	pool.New = func() interface{} {
+		typ := reflect.SliceOf(elemType)
+		slicePt := reflect.New(typ)
+		slicePt.Elem().Set(reflect.MakeSlice(typ, 0, 1))
+		return slicePt.Interface()
 	}
-	typ := reflect.SliceOf(elemType)
-	slice := reflect.New(typ).Elem() // slices must be settable for gob decoding
-	slice.Set(reflect.MakeSlice(typ, 0, 1))
-	return slice
-}
-
-func putSlice(slice reflect.Value) {
-	elemType := slice.Type().Elem()
-	m := poolMap.Load().(map[reflect.Type]*sync.Pool)
-	// put pointer to slice to retain settability
-	m[elemType].Put(slice.Addr().Interface())
+	slicePools[elemType] = pool
+	return pool
 }
 
 func newErr(str string) error {

@@ -37,8 +37,7 @@ type sender struct {
 	batchLen    int32
 }
 
-func (s *sender) sendToEncoder(batch reflect.Value) (err bool) {
-	data := userData{s, batch}
+func (s *sender) sendToEncoder(data userData) (err bool) {
 	// Simply sending to the encoder leads to deadlocks,
 	// keep processing credits
 	for {
@@ -54,24 +53,6 @@ func (s *sender) sendToEncoder(batch reflect.Value) (err bool) {
 	}
 }
 
-// non eccedere recvBufCap/2?
-func (s *sender) createBatch(firstVal reflect.Value) (batch reflect.Value, eos bool) {
-	batch = (<-s.batchList).Slice(0, 1)
-	batch.Index(0).Set(firstVal)
-
-	numVals := int(atomic.LoadInt32(&s.batchLen))
-	for i := 1; i < numVals && s.credit > 0; i++ {
-		val, ok := s.dataChan.TryRecv()
-		if !ok {
-			eos = val != reflect.Value{}
-			return
-		}
-		s.credit--
-		batch = reflect.Append(batch, val)
-	}
-	return
-}
-
 func (s *sender) chanClosed() {
 	s.sendToEncoder(reflect.Value{})
 	s.table.Lock()
@@ -81,6 +62,8 @@ func (s *sender) chanClosed() {
 
 func (s *sender) run() {
 	defer close(s.quit)
+
+	pool := slicePool(s.dataChan.Type().Elem())
 
 	// at most cap(s.toEncoder)+2 batches are around simultaneously, cap(s.toEncoder)
 	// in the buffer and other two being processed in the sender and encoder goroutines
@@ -120,7 +103,19 @@ func (s *sender) run() {
 				return
 			}
 			s.credit--
-			batch, eos := s.createBatch(val)
+			batch = reflect.ValueOf(pool.Get()).Elem().Slice(0, 1)
+			batch.Index(0).Set(firstVal)
+
+			numVals := int(atomic.LoadInt32(&s.batchLen))
+			for i := 1; i < numVals && s.credit > 0; i++ {
+				val, ok := s.dataChan.TryRecv()
+				if !ok {
+					eos = val != reflect.Value{}
+					break
+				}
+				s.credit--
+				batch.Set(reflect.Append(batch, val))
+			}
 			err := s.sendToEncoder(batch)
 			if eos {
 				s.chanClosed()
@@ -129,26 +124,25 @@ func (s *sender) run() {
 			if err {
 				return
 			}
-			// call Gosched here?
 		}
 	}
 }
 
-type credRouter struct {
+type sendManager struct {
 	credits   <-chan credit   // from decoder
 	toEncoder chan<- userData // elements
 	table     sendTable
 	mn        *Manager
 }
 
-func (r *credRouter) startSender(info openInfo) {
+func (m *sendManager) startSender(info openInfo) {
 	credits := make(chan int)
 	quit := make(chan struct{})
 	// table is locked
-	r.table.chans[info.id] = senderChans{credits, quit}
+	m.table.chans[info.id] = senderChans{credits, quit}
 
-	go (&sender{info.id, info.dataChan, credits, r.mn.ErrorSignal(),
-		r.toEncoder, quit, &r.table, info.initCred, info.initCred, nil, 1}).run()
+	go (&sender{info.id, info.dataChan, credits, m.mn.ErrorSignal(),
+		m.toEncoder, quit, &m.table, info.initCred, info.initCred, nil, 1}).run()
 }
 
 // Open a net-chan for sending.
@@ -163,29 +157,29 @@ func (r *credRouter) startSender(info openInfo) {
 //     In this case, open adds the entry to the pending table (we don't know the channel
 //     id yet), with 0 credit. When the message arrives, we patch the entry with the
 //     credit and move it from the pending table to the final table.
-func (r *credRouter) open(nameStr string, ch reflect.Value) error {
-	r.table.Lock()
-	defer r.table.Unlock()
+func (m *sendManager) open(nameStr string, ch reflect.Value) error {
+	m.table.Lock()
+	defer m.table.Unlock()
 
 	name := hashName(nameStr)
-	info, present := r.table.info[name]
+	info, present := m.table.info[name]
 	if present {
 		// Initial credit already arrived.
 		info.dataChan = ch
-		r.startSender(info)
-		delete(r.table.info, name)
+		m.startSender(info)
+		delete(m.table.info, name)
 		return nil
 	}
 	// Initial credit did not arrive yet.
-	r.table.info[name] = openInfo{dataChan: ch}
+	m.table.info[name] = openInfo{dataChan: ch}
 	return nil
 }
 
 // Got a credit from the decoder.
-func (r *credRouter) handleCredit(cred credit) error {
-	r.table.Lock()
-	chans, present := r.table.chans[cred.id]
-	r.table.Unlock()
+func (m *sendManager) handleCredit(cred credit) error {
+	m.table.Lock()
+	chans, present := m.table.chans[cred.id]
+	m.table.Unlock()
 	if !present {
 		// It may happen that the entry is not present,
 		// because the net-chan has just been closed; no problem.
@@ -209,43 +203,43 @@ func (r *credRouter) handleCredit(cred credit) error {
 //     attack and shut down with an error.
 
 // An initial credit arrived.
-func (r *credRouter) handleInitCred(cred credit) error {
-	r.table.Lock()
-	defer r.table.Unlock()
+func (m *sendManager) handleInitCred(cred credit) error {
+	m.table.Lock()
+	defer m.table.Unlock()
 
-	info, present := r.table.info[*cred.Name]
+	info, present := m.table.info[*cred.Name]
 	if present {
 		// User already called Open(Send).
 		info.id = cred.id
 		info.initCred = cred.Amount
-		r.startSender(info)
-		delete(r.table.info, *cred.Name)
+		m.startSender(info)
+		delete(m.table.info, *cred.Name)
 		return nil
 	}
 	// User didn't call Open(Send) yet.
-	r.table.info[*cred.Name] = openInfo{id: cred.id, initCred: cred.Amount}
+	m.table.info[*cred.Name] = openInfo{id: cred.id, initCred: cred.Amount}
 	return nil
 }
 
-func (r *credRouter) run() {
+func (m *sendManager) run() {
 	for {
-		cred, ok := <-r.credits
+		cred, ok := <-m.credits
 		if !ok {
 			// An error occurred and decoder shut down.
 			return
 		}
-		err := r.mn.Error()
+		err := m.mn.Error()
 		if err != nil {
 			// keep draining credits so that decoder doesn't block sending
 			continue
 		}
 		if cred.Name == nil {
-			err = r.handleCredit(cred)
+			err = m.handleCredit(cred)
 		} else {
-			err = r.handleInitCred(cred)
+			err = m.handleInitCred(cred)
 		}
 		if err != nil {
-			go r.mn.ShutDownWith(err)
+			go m.mn.ShutDownWith(err)
 		}
 	}
 }
