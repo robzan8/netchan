@@ -63,9 +63,9 @@ func (o *once) Do(f func()) {
 // A Manager handles the message traffic of its connection, implementing the netchan
 // protocol.
 type Manager struct {
-	conn    io.ReadWriteCloser
-	elemRtr *elemRouter
-	credRtr *credRouter
+	conn   io.ReadWriteCloser
+	recvMn *recvManager
+	sendMn *sendManager
 
 	errOnce, closeOnce once
 	err, closeErr      error
@@ -113,6 +113,11 @@ Error and keeps draining the channels until they are empty. Then it sends the er
 the peer and closes the connection.
 */
 
+const (
+	defMsgSizeLimit = 16 * 1024
+	minMsgSizeLimit = wantBatchSize * 2
+)
+
 // Manage function starts a new Manager for the specified connection and returns it. The
 // connection can be any full-duplex io.ReadWriteCloser that provides in-order delivery
 // of data with best-effort reliability. On each end, a connection must have only one
@@ -126,7 +131,7 @@ the peer and closes the connection.
 // the default will be used. When a too big message is received, an error is signaled on
 // this manager and the manager shuts down.
 func Manage(conn io.ReadWriteCloser) *Manager {
-	return ManageLimit(conn, defMsgSizeLimit, defBufferSize)
+	return ManageLimit(conn, defMsgSizeLimit)
 }
 
 type bufReader interface {
@@ -140,20 +145,20 @@ type bufWriter interface {
 }
 
 func ManageLimit(conn io.ReadWriteCloser, msgSizeLimit int) *Manager {
-	if msgSizeLimit <= 0 {
-		msgSizeLimit = 16 * 1024
+	if msgSizeLimit < minMsgSizeLimit {
+		msgSizeLimit = minMsgSizeLimit
 	}
 
 	// create all the components, connect them with channels and fire up the goroutines.
-	elemRtr := new(elemRouter)
-	credRtr := new(credRouter)
-	mn := &Manager{conn: conn, elemRtr: elemRtr, credRtr: credRtr}
+	recvMn := new(recvManager)
+	sendMn := new(sendManager)
+	mn := &Manager{conn: conn, recvMn: recvMn, sendMn: sendMn}
 	mn.errOnce.done = make(chan struct{})
 	mn.closeOnce.done = make(chan struct{})
 
-	const chCap int = 0
-	elemRtrCh := make(chan message, chCap)
-	credRtrCh := make(chan message, chCap)
+	const chCap int = 8
+	recvMnCh := make(chan userData, chCap)
+	sendMnCh := make(chan credit, chCap)
 	encData := make(chan userData, chCap)
 	encCredits := make(chan credit, chCap)
 
@@ -166,28 +171,26 @@ func ManageLimit(conn io.ReadWriteCloser, msgSizeLimit int) *Manager {
 	enc.countWr = countWriter{w: bw}
 	enc.enc = gob.NewEncoder(&enc.countWr)
 
-	dec := &decoder{
-		toElemRtr:    elemRtrCh,
-		toCredRtr:    credRtrCh,
-		types:        typeTable{elemType: make(map[int]reflect.Type)},
-		mn:           mn,
-		msgSizeLimit: msgSizeLimit,
-	}
+	dec := &decoder{toRecvMn: recvMnCh, toSendMn: sendMnCh, mn: mn,
+		msgSizeLimit: msgSizeLimit}
 	br, ok := conn.(bufReader)
 	if !ok {
 		br = bufio.NewReader(conn)
 	}
+	dec.types.elemType = make(map[int]reflect.Type)
 	dec.limitedRd = limitedReader{bufReader: br}
-	dec.dec = gob.NewDecoder(&dec.limReader)
+	dec.dec = gob.NewDecoder(&dec.limitedRd)
 
-	*elemRtr = elemRouter{elements: elemRtrCh,
-		toEncoder: encCh, types: &dec.types, mn: mn}
-	elemRtr.table.m = make(map[hashedName]chan<- reflect.Value)
-	*credRtr = credRouter{credits: credRtrCh, toEncoder: encCh, mn: mn}
-	credRtr.table.m = make(map[hashedName]*sendEntry)
+	*recvMn = recvManager{dataChan: recvMnCh, toEncoder: encCredits,
+		types: &dec.types, mn: mn}
+	recvMn.table.entry = make(map[int]recvEntry)
+	recvMn.table.name = make(map[hashedName]struct{})
+	*sendMn = sendManager{credits: sendMnCh, toEncoder: encData, mn: mn}
+	sendMn.table.chans = make(map[int]senderChans)
+	sendMn.table.info = make(map[hashedName]openInfo)
 
-	go mn.elemRtr.run()
-	go mn.credRtr.run()
+	go recvMn.run()
+	go sendMn.run()
 	go enc.run()
 	go dec.run()
 	return mn
@@ -220,7 +223,7 @@ func (m *Manager) OpenSend(name string, channel interface{}) error {
 	if ch.Type().ChanDir()&reflect.RecvDir == 0 {
 		return newErr("OpenSend requires a <-chan")
 	}
-	return m.credRtr.open(name, ch)
+	return m.sendMn.open(name, ch)
 }
 
 func (m *Manager) OpenRecv(name string, channel interface{}, bufferCap int) error {
@@ -234,7 +237,7 @@ func (m *Manager) OpenRecv(name string, channel interface{}, bufferCap int) erro
 	if bufferCap <= 0 {
 		return newErr("OpenRecv bufferCap must be at least 1")
 	}
-	return m.elemRtr.open(name, ch, bufferCap)
+	return m.recvMn.open(name, ch, bufferCap)
 }
 
 // Error returns the first error that occurred on this manager. If no error

@@ -75,7 +75,7 @@ func sendHeartbeat(hb chan<- struct{}, mn *netchan.Manager) {
 // goes form peer 2 to peer 1. It is useful in cases where the protocol is symmetrical,
 // like heartbeating.
 func heartbeatPeer(conn io.ReadWriteCloser) {
-	mn := netchan.Manage(conn, 0)
+	mn := netchan.Manage(conn)
 	// the same manager is used to open both channels.
 	// On each end, a connection must have only one manager
 	recv := make(chan struct{})

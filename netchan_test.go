@@ -8,6 +8,10 @@ import (
 	"time"
 )
 
+func init() {
+	log.SetFlags(log.LstdFlags | log.Lshortfile)
+}
+
 // pipeConn represents one side of a full-duplex
 // connection based on io.PipeReader/Writer
 type pipeConn struct {
@@ -87,26 +91,26 @@ func checkIntSlice(t *testing.T, s []int) {
 // start the producer before the consumer
 func TestSendThenRecv(t *testing.T) {
 	sideA, sideB := newPipeConn()
-	intProducer(t, Manage(sideA, 0), "integers", 100)
+	intProducer(t, Manage(sideA), "integers", 100)
 	time.Sleep(50 * time.Millisecond)
-	s := <-intConsumer(t, Manage(sideB, 0), "integers")
+	s := <-intConsumer(t, Manage(sideB), "integers")
 	checkIntSlice(t, s)
 }
 
 // start the consumer before the producer
 func TestRecvThenSend(t *testing.T) {
 	sideA, sideB := newPipeConn()
-	sliceCh := intConsumer(t, Manage(sideB, 0), "integers")
+	sliceCh := intConsumer(t, Manage(sideB), "integers")
 	time.Sleep(50 * time.Millisecond)
-	intProducer(t, Manage(sideA, 0), "integers", 100)
+	intProducer(t, Manage(sideA), "integers", 100)
 	checkIntSlice(t, <-sliceCh)
 }
 
 // open many chans in both directions
 func TestManyChans(t *testing.T) {
 	sideA, sideB := newPipeConn()
-	manA := Manage(sideA, 0)
-	manB := Manage(sideB, 0)
+	manA := Manage(sideA)
+	manB := Manage(sideB)
 	var sliceChans [100]<-chan []int
 	for i := range sliceChans {
 		chName := "integers" + strconv.Itoa(i)
@@ -131,8 +135,8 @@ func TestManyChans(t *testing.T) {
 // TODO: find a better way of testing this
 func TestCredits(t *testing.T) {
 	sideA, sideB := newPipeConn()
-	intProducer(t, Manage(sideA, 0), "integers", 1000)
-	s := <-intConsumer(t, Manage(sideB, 0), "integers")
+	intProducer(t, Manage(sideA), "integers", 1000)
+	s := <-intConsumer(t, Manage(sideB), "integers")
 	checkIntSlice(t, s)
 }
 
@@ -143,19 +147,19 @@ func TestMsgSizeLimit(t *testing.T) {
 }
 
 const (
-	limit     = 200 // size limit enforced by sliceConsumer
-	numSlices = 100 // number of slices to send
+	limit     = 2000 // size limit enforced by sliceConsumer
+	numSlices = 20   // number of slices to send
 )
 
 // sliceProducer sends on "slices". The last slice will be too big.
 func sliceProducer(t *testing.T, conn io.ReadWriteCloser) {
-	mn := Manage(conn, 0)
+	mn := Manage(conn)
 	ch := make(chan []byte, 1)
 	err := mn.OpenSend("slices", ch)
 	if err != nil {
 		log.Fatal(err)
 	}
-	small := make([]byte, limit-10)
+	small := make([]byte, limit-100) // some tolerance for gob type info
 	big := make([]byte, limit+5)
 	for i := 1; i <= numSlices; i++ {
 		slice := small
@@ -175,7 +179,7 @@ func sliceProducer(t *testing.T, conn io.ReadWriteCloser) {
 // and must generate an error that matches the one returned by the limitedReader used by
 // the decoder
 func sliceConsumer(t *testing.T, conn io.ReadWriteCloser) {
-	mn := Manage(conn, limit)
+	mn := ManageLimit(conn, limit)
 	// use a receive buffer with capacity 1, so that items come
 	// one at a time and we get the error for the last one only
 	ch := make(chan []byte)

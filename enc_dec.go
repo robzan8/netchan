@@ -26,6 +26,7 @@ type header struct {
 	Id      int
 }
 
+// same as net.Error
 type netErrorI interface {
 	error
 	Timeout() bool   // Is the error a timeout?
@@ -112,7 +113,8 @@ func (e *encoder) handleData(data userData) {
 	}
 	batchLen := float32(*data.batchLen)
 	if wantBatchLen > batchLen*1.2 || wantBatchLen < batchLen*0.8 {
-		atomic.StoreInt32(data.batchLen, int32(batchLen*(2/3)+wantBatchLen*(1/3)+0.5))
+		atomic.StoreInt32(data.batchLen, int32((batchLen+wantBatchLen+1)*0.5))
+		//atomic.StoreInt32(data.batchLen, int32(wantBatchLen+0.5))
 	}
 }
 
@@ -201,13 +203,13 @@ type decoder struct {
 	types        typeTable // updated by recvManager
 	mn           *Manager
 	msgSizeLimit int
-	limReader    limitedReader
+	limitedRd    limitedReader
 	dec          *gob.Decoder
 }
 
 func (d *decoder) decodeVal(val reflect.Value) error {
 	// reset the limit before each Decode invocation
-	d.limReader.N = d.msgSizeLimit
+	d.limitedRd.N = d.msgSizeLimit
 	return d.dec.DecodeValue(val)
 }
 
@@ -250,7 +252,7 @@ func (d *decoder) run() (err error) {
 			elemType, present := d.types.elemType[h.Id]
 			d.types.Unlock()
 			if !present {
-				return errInvalidId
+				return fmtErr("message with invalid ID received (%d)\n", h.Id)
 			}
 			batch := reflect.New(reflect.SliceOf(elemType)).Elem()
 			err = d.decodeVal(batch)
@@ -271,6 +273,7 @@ func (d *decoder) run() (err error) {
 			if cred.Amount <= 0 {
 				return newErr("credit with non-positive value received")
 			}
+			cred.id = h.Id
 			d.toSendMn <- cred
 
 		case errorMsg:

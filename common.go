@@ -32,8 +32,6 @@ func newErr(str string) error {
 	return errors.New("netchan: " + str)
 }
 
-var errInvalidId = newErr("message with invalid ID received")
-
 func fmtErr(format string, a ...interface{}) error {
 	return fmt.Errorf("netchan: "+format, a...)
 }

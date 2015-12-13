@@ -5,9 +5,15 @@ import (
 	"sync"
 )
 
+type recvEntry struct {
+	buffer chan<- reflect.Value
+	name   hashedName
+}
+
 type recvTable struct {
 	sync.Mutex
-	buffer map[int]chan<- reflect.Value
+	entry map[int]recvEntry
+	name  map[hashedName]struct{}
 }
 
 type receiver struct {
@@ -90,7 +96,7 @@ func (m *recvManager) open(nameStr string, ch reflect.Value, bufCap int) error {
 	defer m.table.Unlock()
 
 	name := hashName(nameStr)
-	_, present := m.table.m[name]
+	_, present := m.table.name[name]
 	if present {
 		return errAlreadyOpen("Recv", nameStr)
 	}
@@ -100,7 +106,8 @@ func (m *recvManager) open(nameStr string, ch reflect.Value, bufCap int) error {
 
 	m.newId++
 	buffer := make(chan reflect.Value, bufCap)
-	m.table.buffer[m.newId] = buffer
+	m.table.entry[m.newId] = recvEntry{buffer, name}
+	m.table.name[name] = struct{}{}
 	m.types.elemType[m.newId] = ch.Type().Elem()
 
 	go receiver{m.newId, name, buffer, m.mn.ErrorSignal(),
@@ -112,14 +119,14 @@ func (m *recvManager) open(nameStr string, ch reflect.Value, bufCap int) error {
 // if data is nil, we got endOfStream
 func (m *recvManager) handleUserData(id int, batch reflect.Value) error {
 	m.table.Lock()
-	buffer, present := m.table.buffer[id]
+	entry, present := m.table.entry[id]
 	m.table.Unlock()
 	if !present {
 		return newErr("data arrived for closed net-chan")
 	}
 
 	select {
-	case buffer <- batch:
+	case entry.buffer <- batch:
 		return nil
 	default:
 		// Sending to the buffer should never be blocking.
@@ -129,18 +136,19 @@ func (m *recvManager) handleUserData(id int, batch reflect.Value) error {
 
 func (m *recvManager) handleEOS(id int) error {
 	m.table.Lock()
-	buffer, present := m.table.buffer[id]
+	entry, present := m.table.entry[id]
 	if !present {
 		m.table.Unlock()
 		return newErr("end of stream message arrived for closed net-chan")
 	}
 	m.types.Lock()
-	delete(m.table.buffer, id)
+	delete(m.table.entry, id)
+	delete(m.table.name, entry.name)
 	delete(m.types.elemType, id)
 	m.types.Unlock()
 	m.table.Unlock()
 
-	close(buffer)
+	close(entry.buffer)
 	return nil
 }
 
