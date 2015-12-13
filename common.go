@@ -15,43 +15,19 @@ func hashName(name string) hashedName {
 	return sha1.Sum([]byte(name))
 }
 
-// returns ceil(x/y)
-func ceilDivide(x, y int) int {
-	return (x + y - 1) / y
-}
-
-type message struct {
-	name    hashedName
-	payload interface{}
-}
-
-// element payloads:
-
 type hello struct{}
 
 type userData struct {
-	val reflect.Value
+	id       int
+	batch    reflect.Value // if zero, represents end of stream
+	batchLen *int32
 }
-
-type wantToSend struct{}
-
-type flush struct{}
-
-type wantToFlush0 struct{}
-
-type wantToFlush1 struct{}
-
-type endOfStream struct{}
-
-// credit payloads:
 
 type credit struct {
+	id     int
 	Amount int
+	Name   *hashedName
 }
-
-type initialCredit credit
-
-// errors:
 
 func newErr(str string) error {
 	return errors.New("netchan: " + str)

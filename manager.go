@@ -3,17 +3,26 @@ package netchan
 /* TODO:
 - more tests
 - fuzzy testing
-- we are not sending/handling initElemMsg
-- transmit user data batched? use internal buffer for sending?
-- implement flushing
+- some utility for debugging (logger?)
+
+- do double buffering for encoding and decoding
+- expose enc/dec buffer size in the API?
+- do batches that auto-decide len based on things already in buffers
+- send batches as slices
+- send a credit for each batch
+- same signature for OpenRecv and OpenSend?
+- header (and credits?) raw encoding?
+- int id?
 
 performance:
 - overlap enc and dec with conn read/write?
 - profile time and memory
+- multisig worth it?
 - adjust ShutDown timeout
 */
 
 import (
+	"bufio"
 	"encoding/gob"
 	"io"
 	"reflect"
@@ -60,10 +69,6 @@ type Manager struct {
 
 	errOnce, closeOnce once
 	err, closeErr      error
-}
-
-type flusher interface {
-	Flush() error
 }
 
 /*
@@ -120,7 +125,21 @@ the peer and closes the connection.
 // messages that will be accepted from the connection. If msgSizeLimit is 0 or negative,
 // the default will be used. When a too big message is received, an error is signaled on
 // this manager and the manager shuts down.
-func Manage(conn io.ReadWriteCloser, msgSizeLimit int) *Manager {
+func Manage(conn io.ReadWriteCloser) *Manager {
+	return ManageLimit(conn, defMsgSizeLimit, defBufferSize)
+}
+
+type bufReader interface {
+	io.Reader
+	io.ByteReader
+}
+
+type bufWriter interface {
+	io.Writer
+	Flush() error
+}
+
+func ManageLimit(conn io.ReadWriteCloser, msgSizeLimit int) *Manager {
 	if msgSizeLimit <= 0 {
 		msgSizeLimit = 16 * 1024
 	}
@@ -135,25 +154,30 @@ func Manage(conn io.ReadWriteCloser, msgSizeLimit int) *Manager {
 	const chCap int = 0
 	elemRtrCh := make(chan message, chCap)
 	credRtrCh := make(chan message, chCap)
-	encCh := make(chan message, chCap)
+	encData := make(chan userData, chCap)
+	encCredits := make(chan credit, chCap)
 
-	enc := &encoder{messages: encCh, mn: mn}
-	enc.enc = gob.NewEncoder(conn)
-	/*f, ok := conn.(flusher)
-	if ok {
-		enc.flushFn = f.Flush
-	} else {
-		enc.flushFn = func() error { return nil }
-	}*/
+	enc := &encoder{dataCh: encData, credits: encCredits, mn: mn}
+	bw, ok := conn.(bufWriter)
+	if !ok {
+		bw = bufio.NewWriter(conn)
+	}
+	enc.flushFn = bw.Flush
+	enc.countWr = countWriter{w: bw}
+	enc.enc = gob.NewEncoder(&enc.countWr)
 
 	dec := &decoder{
 		toElemRtr:    elemRtrCh,
 		toCredRtr:    credRtrCh,
-		types:        typeTable{m: make(map[hashedName]reflect.Type)},
+		types:        typeTable{elemType: make(map[int]reflect.Type)},
 		mn:           mn,
 		msgSizeLimit: msgSizeLimit,
-		limReader:    limitedReader{R: conn},
 	}
+	br, ok := conn.(bufReader)
+	if !ok {
+		br = bufio.NewReader(conn)
+	}
+	dec.limitedRd = limitedReader{bufReader: br}
 	dec.dec = gob.NewDecoder(&dec.limReader)
 
 	*elemRtr = elemRouter{elements: elemRtrCh,
