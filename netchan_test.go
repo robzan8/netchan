@@ -159,7 +159,7 @@ func sliceProducer(t *testing.T, conn io.ReadWriteCloser) {
 	if err != nil {
 		log.Fatal(err)
 	}
-	small := make([]byte, limit-100) // some tolerance for gob type info
+	small := make([]byte, limit-30) // some tolerance for gob type info
 	big := make([]byte, limit+5)
 	for i := 1; i <= numSlices; i++ {
 		slice := small
@@ -202,6 +202,7 @@ func sliceConsumer(t *testing.T, conn io.ReadWriteCloser) {
 			log.Fatal("manager did not block too big message")
 		case <-mn.ErrorSignal():
 			err := mn.Error()
+			// TODO: check err string content, error may arrive from peer
 			if err == errMsgTooBig {
 				return // success
 			}
