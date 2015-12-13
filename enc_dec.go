@@ -113,7 +113,7 @@ func (e *encoder) handleData(data userData) {
 	}
 	batchLen := float32(*data.batchLen)
 	if wantBatchLen > batchLen*1.2 || wantBatchLen < batchLen*0.8 {
-		atomic.StoreInt32(data.batchLen, int32((batchLen+wantBatchLen+1)*0.5))
+		atomic.StoreInt32(data.batchLen, int32((batchLen+wantBatchLen)*0.5+0.5))
 		//atomic.StoreInt32(data.batchLen, int32(wantBatchLen+0.5))
 	}
 }
@@ -265,7 +265,7 @@ func (d *decoder) run() (err error) {
 			d.toRecvMn <- userData{h.Id, reflect.Value{}, nil}
 
 		case creditMsg:
-			var cred credit
+			cred := credit{id: h.Id}
 			err = d.decode(&cred)
 			if err != nil {
 				return
@@ -273,7 +273,6 @@ func (d *decoder) run() (err error) {
 			if cred.Amount <= 0 {
 				return newErr("credit with non-positive value received")
 			}
-			cred.id = h.Id
 			d.toSendMn <- cred
 
 		case errorMsg:
