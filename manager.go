@@ -125,7 +125,12 @@ the peer and closes the connection.
 // the default will be used. When a too big message is received, an error is signaled on
 // this manager and the manager shuts down.
 func Manage(conn io.ReadWriteCloser) *Manager {
-	return NewManager(conn, defMsgSizeLimit, defBufferSize)
+	return ManageLimit(conn, defMsgSizeLimit, defBufferSize)
+}
+
+type bufReader interface {
+	io.Reader
+	io.ByteReader
 }
 
 type bufWriter interface {
@@ -133,7 +138,7 @@ type bufWriter interface {
 	Flush() error
 }
 
-func NewManager(conn io.ReadWriteCloser, msgSizeLimit int) *Manager {
+func ManageLimit(conn io.ReadWriteCloser, msgSizeLimit int) *Manager {
 	if msgSizeLimit <= 0 {
 		msgSizeLimit = 16 * 1024
 	}
@@ -156,17 +161,22 @@ func NewManager(conn io.ReadWriteCloser, msgSizeLimit int) *Manager {
 	if !ok {
 		bw = bufio.NewWriter(conn)
 	}
-	enc.enc = gob.NewEncoder(bw)
 	enc.flushFn = bw.Flush
+	enc.countWr = countWriter{w: bw}
+	enc.enc = gob.NewEncoder(&enc.countWr)
 
 	dec := &decoder{
 		toElemRtr:    elemRtrCh,
 		toCredRtr:    credRtrCh,
-		types:        typeTable{m: make(map[hashedName]reflect.Type)},
+		types:        typeTable{elemType: make(map[int]reflect.Type)},
 		mn:           mn,
 		msgSizeLimit: msgSizeLimit,
-		limReader:    limitedReader{R: conn},
 	}
+	br, ok := conn.(bufReader)
+	if !ok {
+		br = bufio.NewReader(conn)
+	}
+	dec.limitedRd = limitedReader{bufReader: br}
 	dec.dec = gob.NewDecoder(&dec.limReader)
 
 	*elemRtr = elemRouter{elements: elemRtrCh,

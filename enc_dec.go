@@ -7,6 +7,7 @@ import (
 	"net"
 	"reflect"
 	"sync"
+	"sync/atomic"
 )
 
 const (
@@ -45,27 +46,35 @@ func (e *netError) Temporary() bool {
 	return e.IsTemporary
 }
 
+type countWriter struct {
+	w io.Writer
+	n int
+}
+
+func (c *countWriter) Write(data []byte) (n int, err error) {
+	n, err = c.w.Write(data)
+	c.n += n
+	return
+}
+
 type encoder struct {
 	dataCh  <-chan userData
 	credits <-chan credit
 	mn      *Manager
-	enc     *gob.Encoder
 	flushFn func() error
+	countWr countWriter
+	enc     *gob.Encoder
 
 	err error
 }
 
-func (e *encoder) encodeVal(val reflect.Value) {
+func (e *encoder) encode(val interface{}) {
 	// when an encoding/transmission error occurs,
 	// encode and flush operations turn into NOPs
 	if e.err != nil {
 		return
 	}
-	e.err = e.enc.EncodeValue(val)
-}
-
-func (e *encoder) encode(val interface{}) {
-	e.encodeVal(reflect.ValueOf(val))
+	e.err = e.enc.EncodeValue(reflect.ValueOf(val))
 }
 
 func (e *encoder) flush() {
@@ -75,15 +84,31 @@ func (e *encoder) flush() {
 	e.err = e.flushFn()
 }
 
-func (e *encoder) encodeData(data userData) {
+const wantBatchSize = 512
+
+func (e *encoder) handleData(data userData) {
 	if data.batch == (reflect.Value{}) {
-		e.encode(header{closeMsg, data.sendr.id})
+		e.encode(header{closeMsg, data.id})
 		return
 	}
-	e.encode(header{dataMsg, data.sendr.id})
-	e.encodeVal(data.batch)
-
-	data.pool.Put(data.batch.Addr().Interface())
+	e.encode(header{dataMsg, data.id})
+	if e.err != nil {
+		return
+	}
+	e.countWr.n = 0
+	e.err = e.enc.EncodeValue(data.batch)
+	if e.err != nil {
+		return
+	}
+	elemSize := float32(e.countWr.n) / float32(data.batch.Len())
+	wantBatchLen := wantBatchSize / elemSize
+	if wantBatchLen < 1 {
+		wantBatchLen = 1
+	}
+	batchLen := float32(*data.batchLen)
+	if wantBatchLen > batchLen*1.2 || wantBatchLen < batchLen*0.8 {
+		atomic.StoreInt32(data.batchLen, int32(batchLen*(2/3)+wantBatchLen*(1/3)+0.5))
+	}
 }
 
 func (e *encoder) bufAndFlush() {
@@ -91,7 +116,7 @@ Loop:
 	for i := 0; i < cap(e.dataCh)+cap(e.credits); i++ {
 		select {
 		case data := <-e.dataCh:
-			e.encodeData(data)
+			e.handleData(data)
 		case cred := <-e.credits:
 			e.encode(header{creditMsg, cred.id})
 			e.encode(cred)
@@ -116,7 +141,7 @@ Loop:
 		}
 		select {
 		case data := <-e.dataCh:
-			e.encodeData(data)
+			e.handleData(data)
 		case cred := <-e.credits:
 			e.encode(header{creditMsg, cred.id})
 			e.encode(cred)
@@ -140,9 +165,10 @@ Loop:
 }
 
 // Like io.LimitedReader, but returns a custom error.
+// TODO: preserve ReadByte method of underlying reader
 type limitedReader struct {
-	R io.Reader // underlying reader
-	N int       // max bytes remaining
+	bufReader     // underlying reader
+	N         int // max bytes remaining
 }
 
 var errMsgTooBig = newErr("too big gob message received")
@@ -154,20 +180,20 @@ func (l *limitedReader) Read(p []byte) (n int, err error) {
 	if len(p) > l.N {
 		p = p[0:l.N]
 	}
-	n, err = l.R.Read(p)
+	n, err = l.bufReader.Read(p)
 	l.N -= n
 	return
 }
 
-type poolMap struct {
+type typeTable struct {
 	sync.Mutex
-	m map[int]*sync.Pool
+	elemType map[int]reflect.Type
 }
 
 type decoder struct {
-	toElemRtr    chan<- userData
-	toCredRtr    chan<- credit
-	pools        poolMap // updated by recvManager
+	toRecvMn     chan<- userData
+	toSendMn     chan<- credit
+	types        typeTable // updated by recvManager
 	mn           *Manager
 	msgSizeLimit int
 	limReader    limitedReader
@@ -186,8 +212,8 @@ func (d *decoder) decode(val interface{}) error {
 
 func (d *decoder) run() (err error) {
 	defer func() {
-		close(d.toElemRtr)
-		close(d.toCredRtr)
+		close(d.toRecvMn)
+		close(d.toSendMn)
 		d.mn.ShutDownWith(err)
 	}()
 
@@ -215,21 +241,21 @@ func (d *decoder) run() (err error) {
 		}
 		switch h.MsgType {
 		case dataMsg:
-			d.pools.Lock()
-			pool, present := d.pools.m[h.Id]
-			d.pools.Unlock()
+			d.types.Lock()
+			elemType, present := d.types.elemType[h.Id]
+			d.types.Unlock()
 			if !present {
 				return errInvalidId
 			}
-			batch := reflect.ValueOf(pool.Get()).Elem()
+			batch := reflect.New(reflect.SliceOf(elemType)).Elem()
 			err = d.decodeVal(batch)
 			if err != nil {
 				return
 			}
-			d.toElemRtr <- userData{h.Id, batch, pool}
+			d.toRecvMn <- userData{h.Id, batch, nil}
 
 		case closeMsg:
-			d.toElemRtr <- userData{h.Id, reflect.Value{}}
+			d.toRecvMn <- userData{h.Id, reflect.Value{}, nil}
 
 		case creditMsg:
 			var cred credit
@@ -240,7 +266,7 @@ func (d *decoder) run() (err error) {
 			if cred.Amount <= 0 {
 				return newErr("credit with non-positive value received")
 			}
-			d.toCredRtr <- cred
+			d.toSendMn <- cred
 
 		case errorMsg:
 			var errStr string

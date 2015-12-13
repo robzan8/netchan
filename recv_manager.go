@@ -3,100 +3,27 @@ package netchan
 import (
 	"reflect"
 	"sync"
-	"sync/atomic"
 )
-
-const (
-	bufMinCap     int = 4
-	bufGrowFactor     = 5
-	numBufs           = 4
-)
-
-type buffer struct {
-	maxCap     int
-	numElems   int32
-	bufs       [bufNumBufs]chan reflect.Value
-	send, recv int
-	mn         *Manager
-	errSig     <-chan struct{}
-}
-
-func newBuffer(mn *Manager, maxCap int) *buffer {
-	buf := new(buffer)
-	buf.maxCap = maxCap
-	cap0 := maxCap / 125
-	if cap0 <= 0 {
-		cap0 = 4
-	}
-	buf.bufs[0] = make(chan reflect.Value, cap0)
-	buf.mn = mn
-	buf.errSig = mn.ErrorSignal()
-	return buf
-}
-
-func (b *buffer) reallocBuf() {
-	newCap := b.maxCap
-	for i := numBufs; i >= b.send; i-- {
-		newCap /= bufGrowFactor
-	}
-	if newCap < bufMinCap {
-		newCap = bufMinCap
-	}
-	b.send++
-
-}
-
-func (b *buffer) put(batch reflect.Value) error {
-	n := int(atomic.AddInt32(&b.numElems, int32(batch.Len())))
-	if n > b.maxCap {
-		return newErr("peer sent more than its credit allowed")
-	}
-	select {
-	case b.bufs[b.send] <- batch:
-		return nil
-	default:
-		b.reallocBuf()
-		b.bufs[b.send] <- batch // won't block, single producer
-	}
-	return nil
-}
-
-func (b *buffer) get() (reflect.Value, error) {
-	select {
-	case batch, ok := <-b.bufs[b.recv]:
-		if ok {
-			atomic.AddInt32(&b.numElems, int32(-batch.Len()))
-			return batch, nil
-		}
-		//?
-	case <-b.errorSignal:
-		return reflect.Value{}, b.mn.Error()
-	}
-}
-
-func (b *buffer) close() {
-	close(b.bufs[b.send])
-}
 
 type recvTable struct {
 	sync.Mutex
-	buffer map[hashedName]chan<- interface{}
+	buffer map[int]chan<- reflect.Value
 }
 
 type receiver struct {
-	id          int
-	name        hashedName
-	buffer      <-chan reflect.Value // <-chan []elemType
-	errorSignal <-chan struct{}
-	dataChan    reflect.Value // chan<- elemType
-	toEncoder   chan<- credit
-	bufCap      int
-	received    int
-	err         bool
+	id        int
+	name      hashedName
+	buffer    <-chan reflect.Value
+	errSig    <-chan struct{}
+	dataChan  reflect.Value // chan<- elemType
+	toEncoder chan<- credit
+	bufCap    int
+	received  int64
+	err       bool
 }
 
 func (r *receiver) sendToUser(val reflect.Value) (err bool) {
-	// Fast path: try sending without involving errorSignal.
+	// Fast path: try sending without involving errSig.
 	ok := r.dataChan.TrySend(val)
 	if ok {
 		return
@@ -104,19 +31,16 @@ func (r *receiver) sendToUser(val reflect.Value) (err bool) {
 	// Slow path, must use reflect.Select
 	sendAndError := [2]reflect.SelectCase{
 		{Dir: reflect.SelectSend, Chan: r.dataChan, Send: val},
-		{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(r.errorSignal)},
+		{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(r.errSig)},
 	}
 	i, _, _ := reflect.Select(sendAndError[:])
-	if i == 1 { // errorSignal
-		err = true
-	}
-	return
+	return i == 1
 }
 
 func (r *receiver) sendToEncoder(cred credit) (err bool) {
 	select {
 	case r.toEncoder <- cred:
-	case <-r.errorSignal:
+	case <-r.errSig:
 		err = true
 	}
 	return
@@ -133,20 +57,27 @@ func (r receiver) run() {
 				return
 			}
 			r.received++
-			if r.received == ceilDivide(r.bufCap, 2) {
-				r.sendToEncoder(&credit{r.id, r.received, nil})
-				r.received = 0
+			select {
+			case batch2, ok := <-r.buffer:
+				if ok {
+					batch = reflect.AppendSlice(batch, batch2)
+				}
+			default:
 			}
-			r.sendToUser(val)
-		case <-r.errorSignal:
+			batchLen := batch.Len()
+			r.sendToEncoder(credit{r.id, batchLen, nil})
+			for i := 0; i < batchLen; i++ {
+				r.sendToUser(batch.Index(i))
+			}
+		case <-r.errSig:
 			return
 		}
 	}
 }
 
 type recvManager struct {
-	elements  <-chan message // from decoder
-	toEncoder chan<- message // credits
+	dataChan  <-chan userData // from decoder
+	toEncoder chan<- credit   // credits
 	table     recvTable
 	types     *typeTable // decoder's
 	mn        *Manager
@@ -167,11 +98,11 @@ func (m *recvManager) open(nameStr string, ch reflect.Value, bufCap int) error {
 	m.types.Lock()
 	defer m.types.Unlock()
 
-	buffer := make(chan reflect.Value, bufCap)
-	m.table.m[name] = buffer
-	m.types.m[name] = ch.Type().Elem()
-
 	m.newId++
+	buffer := make(chan reflect.Value, bufCap)
+	m.table.buffer[m.newId] = buffer
+	m.types.elemType[m.newId] = ch.Type().Elem()
+
 	go receiver{m.newId, name, buffer, m.mn.ErrorSignal(),
 		ch, m.toEncoder, bufCap, 0, false}.run()
 	return nil
@@ -179,16 +110,16 @@ func (m *recvManager) open(nameStr string, ch reflect.Value, bufCap int) error {
 
 // Got an element from the decoder.
 // if data is nil, we got endOfStream
-func (m *recvManager) handleUserData(data *userData) error {
+func (m *recvManager) handleUserData(id int, batch reflect.Value) error {
 	m.table.Lock()
-	buffer, present := m.table.m[data.id]
+	buffer, present := m.table.buffer[id]
 	m.table.Unlock()
 	if !present {
 		return newErr("data arrived for closed net-chan")
 	}
 
 	select {
-	case buffer <- data.val:
+	case buffer <- batch:
 		return nil
 	default:
 		// Sending to the buffer should never be blocking.
@@ -196,16 +127,16 @@ func (m *recvManager) handleUserData(data *userData) error {
 	}
 }
 
-func (m *recvManager) handleEOS(name hashedName) error {
+func (m *recvManager) handleEOS(id int) error {
 	m.table.Lock()
-	buffer, present := m.table.m[name]
+	buffer, present := m.table.buffer[id]
 	if !present {
 		m.table.Unlock()
 		return newErr("end of stream message arrived for closed net-chan")
 	}
 	m.types.Lock()
-	delete(m.table.m, name)
-	delete(m.types.m, name)
+	delete(m.table.buffer, id)
+	delete(m.types.elemType, id)
 	m.types.Unlock()
 	m.table.Unlock()
 
@@ -215,7 +146,7 @@ func (m *recvManager) handleEOS(name hashedName) error {
 
 func (m *recvManager) run() {
 	for {
-		data, ok := <-m.elements
+		data, ok := <-m.dataChan
 		if !ok {
 			// An error occurred and decoder shut down.
 			return
@@ -225,16 +156,11 @@ func (m *recvManager) run() {
 			// keep draining bla bla
 			continue
 		}
-
-		switch pay := msg.payload.(type) {
-		case *userData:
-			err = m.handleUserData(msg.name, pay)
-		case *endOfStream:
-			err = m.handleEOS(msg.name)
-		default:
-			panic("unexpected msg type")
+		if data.batch == (reflect.Value{}) {
+			err = m.handleEOS(data.id)
+		} else {
+			err = m.handleUserData(data.id, data.batch)
 		}
-
 		if err != nil {
 			go m.mn.ShutDownWith(err)
 		}

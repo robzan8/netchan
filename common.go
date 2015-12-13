@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"reflect"
 	"strconv"
-	"sync"
 )
 
 // sha1-hashed name of a net-chan
@@ -19,39 +18,15 @@ func hashName(name string) hashedName {
 type hello struct{}
 
 type userData struct {
-	id    int
-	batch reflect.Value // if zero, represents end of stream
-	pool  *sync.Pool
+	id       int
+	batch    reflect.Value // if zero, represents end of stream
+	batchLen *int32
 }
 
 type credit struct {
 	id     int
 	Amount int
 	Name   *hashedName
-}
-
-var (
-	poolsMu    sync.Mutex
-	slicePools = make(map[reflect.Type]*sync.Pool)
-)
-
-func slicePool(elemType reflect.Type) *sync.Pool {
-	poolsMu.Lock()
-	defer poolsMu.Unlock()
-
-	pool, present := slicePools[elemType]
-	if present {
-		return pool
-	}
-	pool = new(sync.Pool)
-	pool.New = func() interface{} {
-		typ := reflect.SliceOf(elemType)
-		slicePt := reflect.New(typ)
-		slicePt.Elem().Set(reflect.MakeSlice(typ, 0, 1))
-		return slicePt.Interface()
-	}
-	slicePools[elemType] = pool
-	return pool
 }
 
 func newErr(str string) error {

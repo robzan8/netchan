@@ -24,20 +24,19 @@ type sendTable struct {
 }
 
 type sender struct {
-	id          int
-	dataChan    reflect.Value
-	credits     <-chan int
-	errorSignal <-chan struct{}
-	toEncoder   chan<- userData
-	quit        chan<- struct{}
-	table       *sendTable // table of the credit router
-	credit      int
-	recvCap     int
-	batchList   chan reflect.Value
-	batchLen    int32
+	id        int
+	dataChan  reflect.Value // <-chan T
+	credits   <-chan int
+	errSig    <-chan struct{}
+	toEncoder chan<- userData
+	quit      chan<- struct{}
+	table     *sendTable // table of the send manager
+	credit    int
+	batchLen  *int32
 }
 
-func (s *sender) sendToEncoder(data userData) (err bool) {
+func (s *sender) sendToEncoder(batch reflect.Value) (err bool) {
+	data := userData{s.id, batch, s.batchLen}
 	// Simply sending to the encoder leads to deadlocks,
 	// keep processing credits
 	for {
@@ -46,36 +45,22 @@ func (s *sender) sendToEncoder(data userData) (err bool) {
 			return
 		case cred := <-s.credits:
 			s.credit += cred
-		case <-s.errorSignal:
+		case <-s.errSig:
 			err = true
 			return
 		}
 	}
 }
 
-func (s *sender) chanClosed() {
-	s.sendToEncoder(reflect.Value{})
-	s.table.Lock()
-	delete(s.table.m, s.name)
-	s.table.Unlock()
-}
-
-func (s *sender) run() {
+func (s sender) run() {
 	defer close(s.quit)
-
-	pool := slicePool(s.dataChan.Type().Elem())
-
-	// at most cap(s.toEncoder)+2 batches are around simultaneously, cap(s.toEncoder)
-	// in the buffer and other two being processed in the sender and encoder goroutines
-	s.batchList = make(chan reflect.Value, cap(s.toEncoder)+2)
-	sliceType := reflect.SliceOf(s.dataChan.Type().Elem())
-	for i := 0; i < cap(s.batchList); i++ {
-		s.batchList <- reflect.MakeSlice(sliceType, 0, 1)
-	}
+	s.batchLen = new(int64)
+	*s.batchLen = 1
+	batchType := reflect.SliceOf(s.dataChan.Type().Elem())
 
 	recvSomething := [3]reflect.SelectCase{
 		{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(s.credits)},
-		{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(s.errorSignal)},
+		{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(s.errSig)},
 		{Dir: reflect.SelectRecv, Chan: s.dataChan},
 	}
 	const (
@@ -94,33 +79,31 @@ func (s *sender) run() {
 		caseI, val, ok := reflect.Select(recvSomething[0:numCases])
 		switch caseI {
 		case recvCredit:
-			s.credit += val.Interface().(int)
+			s.credit += int(val.Int())
 		case recvError:
 			return
 		case recvData:
 			if !ok {
-				s.chanClosed()
+				s.sendToEncoder(reflect.Value{}) // end of stream
+				s.table.Lock()
+				delete(s.table.chans, s.id)
+				s.table.Unlock()
 				return
 			}
 			s.credit--
-			batch = reflect.ValueOf(pool.Get()).Elem().Slice(0, 1)
-			batch.Index(0).Set(firstVal)
-
-			numVals := int(atomic.LoadInt32(&s.batchLen))
-			for i := 1; i < numVals && s.credit > 0; i++ {
+			batchLen := int(atomic.LoadInt32(s.batchLen))
+			// TODO: choose initial slice capacity better
+			batch = reflect.MakeSlice(batchType, 1, 1)
+			batch.Index(0).Set(val)
+			for i := 1; i < batchLen && s.credit > 0; i++ {
 				val, ok := s.dataChan.TryRecv()
-				if !ok {
-					eos = val != reflect.Value{}
+				if !ok { // no items available or channel closed
 					break
 				}
 				s.credit--
-				batch.Set(reflect.Append(batch, val))
+				batch = reflect.Append(batch, val)
 			}
 			err := s.sendToEncoder(batch)
-			if eos {
-				s.chanClosed()
-				return
-			}
 			if err {
 				return
 			}
@@ -141,8 +124,8 @@ func (m *sendManager) startSender(info openInfo) {
 	// table is locked
 	m.table.chans[info.id] = senderChans{credits, quit}
 
-	go (&sender{info.id, info.dataChan, credits, m.mn.ErrorSignal(),
-		m.toEncoder, quit, &m.table, info.initCred, info.initCred, nil, 1}).run()
+	go sender{info.id, info.dataChan, credits, m.mn.ErrorSignal(),
+		m.toEncoder, quit, &m.table, info.initCred, nil}.run()
 }
 
 // Open a net-chan for sending.

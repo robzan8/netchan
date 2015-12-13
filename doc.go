@@ -19,7 +19,7 @@ following (error handling aside).
 
 On the send side:
 	mn := netchan.Manage(conn) // let a netchan.Manager handle the connection
-	ch := make(chan int, 10)
+	ch := make(chan int, 20)
 	err := mn.OpenSend("integers", ch) // open net-chan "integers" for sending through ch
 	for i := 0; i < n; i++ {
 		ch <- i
@@ -28,7 +28,7 @@ On the send side:
 
 On the receive side:
 	mn := netchan.Manage(conn)
-	ch := make(chan int)
+	ch := make(chan int, 20)
 	recvBufCap := 100
 	err := mn.OpenRecv("integers", ch, recvBufCap)
 	for i := range ch {
