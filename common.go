@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
-	"strconv"
 )
 
 // sha1-hashed name of a net-chan
@@ -40,5 +39,5 @@ func fmtErr(format string, a ...interface{}) error {
 }
 
 func errAlreadyOpen(dir, name string) error {
-	return fmtErr("Open%s: net-chan %s is already open", dir, strconv.Quote(name))
+	return fmtErr("Open%s: net-chan %s is already open", dir, name)
 }
