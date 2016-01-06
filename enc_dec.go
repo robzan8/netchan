@@ -106,15 +106,17 @@ func (e *encoder) handleData(data userData) {
 	if e.err != nil {
 		return
 	}
-	elemSize := float32(e.countWr.n) / float32(data.batch.Len())
-	wantBatchLen := wantBatchSize / elemSize
+	itemSize := float32(e.countWr.n) / float32(data.batch.Len())
+	if itemSize < 1 {
+		itemSize = 1
+	}
+	wantBatchLen := wantBatchSize / itemSize
 	if wantBatchLen < 1 {
 		wantBatchLen = 1
 	}
 	batchLen := float32(*data.batchLen)
-	if wantBatchLen > batchLen*1.2 || wantBatchLen < batchLen*0.8 {
-		atomic.StoreInt32(data.batchLen, int32((batchLen+wantBatchLen)*0.5+0.5))
-		//atomic.StoreInt32(data.batchLen, int32(wantBatchLen+0.5))
+	if batchLen < wantBatchLen*(3/4) || batchLen > wantBatchLen*(4/3) {
+		atomic.StoreInt32(data.batchLen, int32(wantBatchLen+0.5))
 	}
 }
 

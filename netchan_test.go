@@ -1,16 +1,15 @@
-package netchan
+package netchan_test
 
 import (
 	"io"
 	"log"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
-)
 
-func init() {
-	log.SetFlags(log.LstdFlags | log.Lshortfile)
-}
+	"github.com/robzan8/netchan"
+)
 
 // pipeConn represents one side of a full-duplex
 // connection based on io.PipeReader/Writer
@@ -31,8 +30,12 @@ func newPipeConn() (sideA, sideB pipeConn) {
 	return
 }
 
+func init() {
+	log.SetFlags(log.LstdFlags | log.Lshortfile)
+}
+
 // intProducer sends integers from 0 to n-1 on net-chan chName
-func intProducer(t *testing.T, mn *Manager, chName string, n int) {
+func intProducer(t *testing.T, mn *netchan.Manager, chName string, n int) {
 	go func() {
 		ch := make(chan int, 15)
 		err := mn.OpenSend(chName, ch)
@@ -52,7 +55,7 @@ func intProducer(t *testing.T, mn *Manager, chName string, n int) {
 
 // intConsumer drains net-chan chName, stores the received integers in a slice
 // and delivers the slice on a channel, which is returned
-func intConsumer(t *testing.T, mn *Manager, chName string) <-chan []int {
+func intConsumer(t *testing.T, mn *netchan.Manager, chName string) <-chan []int {
 	sliceCh := make(chan []int, 1)
 	go func() {
 		var slice []int
@@ -91,26 +94,26 @@ func checkIntSlice(t *testing.T, s []int) {
 // start the producer before the consumer
 func TestSendThenRecv(t *testing.T) {
 	sideA, sideB := newPipeConn()
-	intProducer(t, Manage(sideA), "integers", 100)
+	intProducer(t, netchan.Manage(sideA), "integers", 100)
 	time.Sleep(50 * time.Millisecond)
-	s := <-intConsumer(t, Manage(sideB), "integers")
+	s := <-intConsumer(t, netchan.Manage(sideB), "integers")
 	checkIntSlice(t, s)
 }
 
 // start the consumer before the producer
 func TestRecvThenSend(t *testing.T) {
 	sideA, sideB := newPipeConn()
-	sliceCh := intConsumer(t, Manage(sideB), "integers")
+	sliceCh := intConsumer(t, netchan.Manage(sideB), "integers")
 	time.Sleep(50 * time.Millisecond)
-	intProducer(t, Manage(sideA), "integers", 100)
+	intProducer(t, netchan.Manage(sideA), "integers", 100)
 	checkIntSlice(t, <-sliceCh)
 }
 
 // open many chans in both directions
 func TestManyChans(t *testing.T) {
 	sideA, sideB := newPipeConn()
-	manA := Manage(sideA)
-	manB := Manage(sideB)
+	manA := netchan.Manage(sideA)
+	manB := netchan.Manage(sideB)
 	var sliceChans [100]<-chan []int
 	for i := range sliceChans {
 		chName := "integers" + strconv.Itoa(i)
@@ -135,8 +138,8 @@ func TestManyChans(t *testing.T) {
 // TODO: find a better way of testing this
 func TestCredits(t *testing.T) {
 	sideA, sideB := newPipeConn()
-	intProducer(t, Manage(sideA), "integers", 1000)
-	s := <-intConsumer(t, Manage(sideB), "integers")
+	intProducer(t, netchan.Manage(sideA), "integers", 1000)
+	s := <-intConsumer(t, netchan.Manage(sideB), "integers")
 	checkIntSlice(t, s)
 }
 
@@ -153,7 +156,7 @@ const (
 
 // sliceProducer sends on "slices". The last slice will be too big.
 func sliceProducer(t *testing.T, conn io.ReadWriteCloser) {
-	mn := Manage(conn)
+	mn := netchan.Manage(conn)
 	ch := make(chan []byte, 1)
 	err := mn.OpenSend("slices", ch)
 	if err != nil {
@@ -179,7 +182,7 @@ func sliceProducer(t *testing.T, conn io.ReadWriteCloser) {
 // and must generate an error that matches the one returned by the limitedReader used by
 // the decoder
 func sliceConsumer(t *testing.T, conn io.ReadWriteCloser) {
-	mn := ManageLimit(conn, limit)
+	mn := netchan.ManageLimit(conn, limit)
 	// use a receive buffer with capacity 1, so that items come
 	// one at a time and we get the error for the last one only
 	ch := make(chan []byte)
@@ -202,8 +205,7 @@ func sliceConsumer(t *testing.T, conn io.ReadWriteCloser) {
 			log.Fatal("manager did not block too big message")
 		case <-mn.ErrorSignal():
 			err := mn.Error()
-			// TODO: check err string content, error may arrive from peer
-			if err == errMsgTooBig {
+			if strings.Contains(err.Error(), "too big") {
 				return // success
 			}
 			log.Fatal(err)
