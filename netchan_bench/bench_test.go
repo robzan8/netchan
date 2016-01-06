@@ -20,6 +20,13 @@ var (
 	done  = make(chan struct{})
 )
 
+func fatal(err error) {
+	if err != nil {
+		log.Output(2, err.Error())
+		os.Exit(1)
+	}
+}
+
 func TestMain(m *testing.M) {
 	flag.Parse()
 
@@ -94,6 +101,27 @@ func Benchmark_Chans10_Size1(b *testing.B) {
 
 func Benchmark_Chans100_Size1(b *testing.B) {
 	task := benchTask{100, 1, b.N}
+	tasks <- task
+	executeTask(task, mn)
+	<-done
+}
+
+func Benchmark_Chans1_Size100(b *testing.B) {
+	task := benchTask{1, 100, b.N}
+	tasks <- task
+	executeTask(task, mn)
+	<-done
+}
+
+func Benchmark_Chans10_Size100(b *testing.B) {
+	task := benchTask{10, 100, b.N}
+	tasks <- task
+	executeTask(task, mn)
+	<-done
+}
+
+func Benchmark_Chans100_Size100(b *testing.B) {
+	task := benchTask{100, 100, b.N}
 	tasks <- task
 	executeTask(task, mn)
 	<-done

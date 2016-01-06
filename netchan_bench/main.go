@@ -29,7 +29,9 @@ func executeTask(task benchTask, mn *netchan.Manager) {
 	for i := 0; i < task.NumChans; i++ {
 		ch := make(chan []byte, chCap)
 		err := mn.OpenSend(fmt.Sprintf("items-%d", i), ch)
-		fatal(err)
+		if err != nil {
+			panic(err)
+		}
 		wg.Add(1)
 		go func() {
 			for j := 0; j < task.NumItems; j++ {
@@ -43,7 +45,9 @@ func executeTask(task benchTask, mn *netchan.Manager) {
 	for i := 0; i < task.NumChans; i++ {
 		ch := make(chan []byte, chCap)
 		err := mn.OpenRecv(fmt.Sprintf("items-%d", i), ch, bufCap)
-		fatal(err)
+		if err != nil {
+			panic(err)
+		}
 		wg.Add(1)
 		go func() {
 			for range ch {
@@ -54,13 +58,6 @@ func executeTask(task benchTask, mn *netchan.Manager) {
 
 	wg.Wait()
 	// runtime.GC()?
-}
-
-func fatal(err error) {
-	if err != nil {
-		log.Output(2, err.Error())
-		os.Exit(1)
-	}
 }
 
 func main() {
