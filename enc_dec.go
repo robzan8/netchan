@@ -115,7 +115,7 @@ func (e *encoder) handleData(data userData) {
 		wantBatchLen = 1
 	}
 	batchLen := float32(*data.batchLen)
-	if batchLen < wantBatchLen*(3/4) || batchLen > wantBatchLen*(4/3) {
+	if batchLen < wantBatchLen*0.75 || batchLen > wantBatchLen*1.25 {
 		atomic.StoreInt32(data.batchLen, int32(wantBatchLen+0.5))
 	}
 }
@@ -123,6 +123,7 @@ func (e *encoder) handleData(data userData) {
 func (e *encoder) bufAndFlush() {
 Loop:
 	for i := 0; i < cap(e.dataCh)+cap(e.credits); i++ {
+		//TODO: this select shows up in profiles
 		select {
 		case data := <-e.dataCh:
 			e.handleData(data)

@@ -85,8 +85,8 @@ func TestMain(m *testing.M) {
 	os.Exit(exitCode)
 }
 
-func Benchmark_Chans1_Size1(b *testing.B) {
-	task := benchTask{1, 1, b.N}
+func Benchmark_Chans20_Size20(b *testing.B) {
+	task := benchTask{20, 20, b.N}
 	tasks <- task
 	executeTask(task, mn)
 	<-done

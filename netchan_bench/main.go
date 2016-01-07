@@ -34,11 +34,11 @@ func executeTask(task benchTask, mn *netchan.Manager) {
 		}
 		wg.Add(1)
 		go func() {
+			defer wg.Done()
 			for j := 0; j < task.NumItems; j++ {
 				ch <- item
 			}
 			close(ch)
-			wg.Done()
 		}()
 	}
 
@@ -50,9 +50,9 @@ func executeTask(task benchTask, mn *netchan.Manager) {
 		}
 		wg.Add(1)
 		go func() {
+			defer wg.Done()
 			for range ch {
 			}
-			wg.Done()
 		}()
 	}
 

@@ -92,7 +92,6 @@ func (s sender) run() {
 			}
 			s.credit--
 			batchLen := int(atomic.LoadInt32(s.batchLen))
-			// TODO: choose initial slice capacity better
 			batch := reflect.MakeSlice(batchType, 1, 1)
 			batch.Index(0).Set(val)
 			for i := 1; i < batchLen && s.credit > 0; i++ {
