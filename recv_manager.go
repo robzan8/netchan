@@ -119,6 +119,9 @@ func (m *recvManager) open(nameStr string, ch reflect.Value, bufCap int) error {
 // Got an element from the decoder.
 // if data is nil, we got endOfStream
 func (m *recvManager) handleUserData(id int, batch reflect.Value) error {
+	if batch.Len() == 0 {
+		return nil
+	}
 	m.table.Lock()
 	entry, present := m.table.entry[id]
 	m.table.Unlock()
