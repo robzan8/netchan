@@ -3,21 +3,12 @@ package netchan
 /* TODO:
 - more tests
 - fuzzy testing
-- some utility for debugging (logger?)
-
-- do double buffering for encoding and decoding
-- expose enc/dec buffer size in the API?
-- do batches that auto-decide len based on things already in buffers
-- send batches as slices
-- send a credit for each batch
-- same signature for OpenRecv and OpenSend?
-- header (and credits?) raw encoding?
-- int id?
-
-performance:
-- overlap enc and dec with conn read/write?
-- profile time and memory
-- multisig worth it?
+- update docs
+- draw graph documenting components
+- debug logger
+- count num of items arriving, must not exceed credit
+- use simple strings instead of sha1?
+- tune desired batch size
 - adjust ShutDown timeout
 */
 
