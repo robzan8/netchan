@@ -20,7 +20,9 @@ var (
 	done  = make(chan struct{})
 )
 
-func fatal(err error) {
+const network = "unix"
+
+func check(err error) {
 	if err != nil {
 		log.Output(2, err.Error())
 		os.Exit(1)
@@ -30,50 +32,49 @@ func fatal(err error) {
 func TestMain(m *testing.M) {
 	flag.Parse()
 
-	cmdName, err := exec.LookPath("netchan_bench")
+	peerPath, err := exec.LookPath("netchan_bench")
 	if err != nil {
 		log.Fatal("Before running the benchmarks, ",
 			"you should install netchan_bench and make it reachable from your $PATH.")
 	}
 	var random [20]byte
 	_, err = rand.Read(random[:])
-	fatal(err)
+	check(err)
 	sockDir := "/tmp/netchan/bench_socks"
 	err = os.MkdirAll(sockDir, 0700)
-	fatal(err)
-	network := "unix"
+	check(err)
 	sockName := sockDir + "/" + hex.EncodeToString(random[:])
 	ln, err := net.Listen(network, sockName)
-	fatal(err)
-	peer := exec.Command(cmdName, network, sockName)
+	check(err)
+	peer := exec.Command(peerPath, network, sockName)
 	stderr, err := peer.StderrPipe()
-	fatal(err)
+	check(err)
 	err = peer.Start()
-	fatal(err)
+	check(err)
 	go func() {
 		var buf [512]byte
 		n, err := stderr.Read(buf[:])
 		if err == io.EOF {
 			return
 		}
-		fatal(err)
+		check(err)
 		log.Fatalf("Error from bench peer: %s", buf[0:n])
 	}()
 	conn, err := ln.Accept()
-	fatal(err)
+	check(err)
 	ln.Close()
 	mn = netchan.Manage(conn)
 	go func() {
 		<-mn.ErrorSignal()
-		if err := mn.Error(); err != io.EOF {
+		if err := mn.Error(); err != netchan.EndOfSession {
 			mn.ShutDown()
 			log.Fatal(err)
 		}
 	}()
 	err = mn.OpenSend("tasks", tasks)
-	fatal(err)
+	check(err)
 	err = mn.OpenRecv("done", done, 1)
-	fatal(err)
+	check(err)
 
 	exitCode := m.Run()
 

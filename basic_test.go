@@ -10,7 +10,7 @@ import (
 
 func checkErrors(mn *netchan.Manager) {
 	<-mn.ErrorSignal()
-	if err := mn.Error(); err != io.EOF {
+	if err := mn.Error(); err != netchan.EndOfSession {
 		log.Fatal(err)
 	}
 }
@@ -68,7 +68,7 @@ func server(conn io.ReadWriteCloser) {
 	close(respCh)
 
 	// wait that client receives everything
-	// and shuts down, we will get EOF
+	// and shuts down, we will get EndOfSession
 	checkErrors(mn)
 }
 

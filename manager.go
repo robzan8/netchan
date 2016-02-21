@@ -265,7 +265,7 @@ func (m *Manager) ErrorSignal() <-chan struct{} {
 // guaranteed to be closed once and only once, even if ShutDown is called multiple times,
 // possibly by multiple goroutines.
 func (m *Manager) ShutDown() error {
-	return m.ShutDownWith(io.EOF)
+	return m.ShutDownWith(EndOfSession)
 }
 
 func (m *Manager) closeConn() {
@@ -277,7 +277,7 @@ func (m *Manager) closeConn() {
 // ShutDownWith is like ShutDown, but err is signaled instead of EOF.
 func (m *Manager) ShutDownWith(err error) error {
 	if err == nil {
-		err = io.EOF
+		err = EndOfSession
 	}
 	m.errOnce.Do(func() {
 		m.err = err

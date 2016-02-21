@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"io"
 	"log"
 	"net"
 	"os"
@@ -12,15 +11,28 @@ import (
 )
 
 type benchTask struct {
+	Type                         string // "netchan" or "gob"
 	NumChans, ItemSize, NumItems int
 }
 
-// should agree with the one defined in package netchan (enc_dec.go)
-const wantBatchSize = 512
+const (
+	// should agree with the ones defined in package netchan (enc_dec.go)
+	wantBatchSize = 512
+	wantBufSize   = 2048
+)
 
-const wantBufSize = 2048
+func doBenchTask(task benchTask, mn *netchan.Manager) {
+	switch task.Type {
+	case "netchan":
+		doNetchanTask(task, mn)
+	case "gob":
+		doGobTask(task, mn)
+	default:
+		panic("Unexpected task type.")
+	}
+}
 
-func executeTask(task benchTask, mn *netchan.Manager) {
+func doNetchanTask(task benchTask, mn *netchan.Manager) {
 	item := make([]byte, task.ItemSize)
 	var wg sync.WaitGroup
 	chCap := wantBatchSize / task.ItemSize
@@ -57,7 +69,6 @@ func executeTask(task benchTask, mn *netchan.Manager) {
 	}
 
 	wg.Wait()
-	// runtime.GC()?
 }
 
 func main() {
@@ -71,7 +82,7 @@ func main() {
 	mn := netchan.Manage(conn)
 	go func() {
 		<-mn.ErrorSignal()
-		if err := mn.Error(); err != io.EOF {
+		if err := mn.Error(); err != netchan.EndOfSession {
 			mn.ShutDown()
 			os.Exit(1)
 		}

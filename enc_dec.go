@@ -284,10 +284,10 @@ func (d *decoder) run() (err error) {
 			if err != nil {
 				return
 			}
-			if errStr == io.EOF.Error() {
-				return io.EOF
+			if errStr == EndOfSession.Error() {
+				return EndOfSession
 			}
-			return errors.New("netchan, error from peer: " + errStr)
+			return errors.New("error from netchan peer: " + errStr)
 
 		case netErrorMsg:
 			netErr := new(netError)
@@ -295,7 +295,7 @@ func (d *decoder) run() (err error) {
 			if err != nil {
 				return
 			}
-			netErr.Str = "netchan, error from peer: " + netErr.Str
+			netErr.Str = "error from netchan peer: " + netErr.Str
 			return netErr
 
 		default:
