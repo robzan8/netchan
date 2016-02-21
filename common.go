@@ -1,7 +1,6 @@
 package netchan
 
 import (
-	"crypto/sha1"
 	"errors"
 	"fmt"
 	"reflect"
@@ -10,13 +9,6 @@ import (
 // EndOfSession is used to signal the graceful end of a netchan session
 // (typically with Manager.ShutDown).
 var EndOfSession = errors.New("netchan: end of session")
-
-// sha1-hashed name of a net-chan
-type hashedName [20]byte
-
-func hashName(name string) hashedName {
-	return sha1.Sum([]byte(name))
-}
 
 type hello struct{}
 
@@ -29,7 +21,8 @@ type userData struct {
 type credit struct {
 	id     int
 	Amount int
-	Name   *hashedName
+	Init   bool
+	Name   string
 }
 
 func newErr(str string) error {

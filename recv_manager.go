@@ -7,18 +7,18 @@ import (
 
 type recvEntry struct {
 	buffer chan<- interface{} // chan of batches
-	name   hashedName
+	name   string
 }
 
 type recvTable struct {
 	sync.Mutex
-	entry map[int]recvEntry
-	name  map[hashedName]struct{}
+	entry   map[int]recvEntry
+	present map[string]struct{}
 }
 
 type receiver struct {
 	id        int
-	name      hashedName
+	name      string
 	buffer    <-chan interface{}
 	errSig    <-chan struct{}
 	dataChan  reflect.Value // chan<- elemType
@@ -53,7 +53,7 @@ func (r *receiver) sendToEncoder(cred credit) (err bool) {
 }
 
 func (r receiver) run() {
-	r.sendToEncoder(credit{r.id, r.bufCap, &r.name}) // initial credit
+	r.sendToEncoder(credit{r.id, r.bufCap, true, r.name}) // initial credit
 	for !r.err {
 		select {
 		case batchE, ok := <-r.buffer:
@@ -72,7 +72,7 @@ func (r receiver) run() {
 			default:
 			}
 			batchLen := batch.Len()
-			r.sendToEncoder(credit{r.id, batchLen, nil})
+			r.sendToEncoder(credit{r.id, batchLen, false, ""})
 			for i := 0; i < batchLen; i++ {
 				r.sendToUser(batch.Index(i))
 			}
@@ -92,14 +92,13 @@ type recvManager struct {
 }
 
 // Open a net-chan for receiving.
-func (m *recvManager) open(nameStr string, ch reflect.Value, bufCap int) error {
+func (m *recvManager) open(name string, ch reflect.Value, bufCap int) error {
 	m.table.Lock()
 	defer m.table.Unlock()
 
-	name := hashName(nameStr)
-	_, present := m.table.name[name]
+	_, present := m.table.present[name]
 	if present {
-		return errAlreadyOpen("Recv", nameStr)
+		return errAlreadyOpen("Recv", name)
 	}
 
 	m.types.Lock()
@@ -108,7 +107,7 @@ func (m *recvManager) open(nameStr string, ch reflect.Value, bufCap int) error {
 	m.newId++
 	buffer := make(chan interface{}, bufCap)
 	m.table.entry[m.newId] = recvEntry{buffer, name}
-	m.table.name[name] = struct{}{}
+	m.table.present[name] = struct{}{}
 	m.types.elemType[m.newId] = ch.Type().Elem()
 
 	go receiver{m.newId, name, buffer, m.mn.ErrorSignal(),
@@ -147,7 +146,7 @@ func (m *recvManager) handleEOS(id int) error {
 	}
 	m.types.Lock()
 	delete(m.table.entry, id)
-	delete(m.table.name, entry.name)
+	delete(m.table.present, entry.name)
 	delete(m.types.elemType, id)
 	m.types.Unlock()
 	m.table.Unlock()

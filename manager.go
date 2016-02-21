@@ -5,9 +5,8 @@ package netchan
 - fuzzy testing
 - update docs
 - draw graph documenting components
-- debug logger
+- debug logger, "want to send" msg
 - count num of items arriving, must not exceed credit
-- use simple strings instead of sha1?
 - tune desired batch size
 - adjust ShutDown timeout
 */
@@ -107,6 +106,7 @@ the peer and closes the connection.
 const (
 	defMsgSizeLimit = 16 * 1024
 	minMsgSizeLimit = wantBatchSize * 2
+	maxNameLen      = 500
 )
 
 // Manage function starts a new Manager for the specified connection and returns it. The
@@ -175,10 +175,10 @@ func ManageLimit(conn io.ReadWriteCloser, msgSizeLimit int) *Manager {
 	*recvMn = recvManager{dataChan: recvMnCh, toEncoder: encCredits,
 		types: &dec.types, mn: mn}
 	recvMn.table.entry = make(map[int]recvEntry)
-	recvMn.table.name = make(map[hashedName]struct{})
+	recvMn.table.present = make(map[string]struct{})
 	*sendMn = sendManager{credits: sendMnCh, toEncoder: encData, mn: mn}
 	sendMn.table.chans = make(map[int]senderChans)
-	sendMn.table.info = make(map[hashedName]openInfo)
+	sendMn.table.info = make(map[string]openInfo)
 
 	go recvMn.run()
 	go sendMn.run()
@@ -207,6 +207,9 @@ func ManageLimit(conn io.ReadWriteCloser, msgSizeLimit int) *Manager {
 // other peer will be closed too. Messages that are already in the buffers or in flight
 // will not be lost.
 func (m *Manager) OpenSend(name string, channel interface{}) error {
+	if len(name) > maxNameLen {
+		return newErr("OpenSend: name too long")
+	}
 	ch := reflect.ValueOf(channel)
 	if ch.Kind() != reflect.Chan {
 		return newErr("OpenSend: channel arg is not a channel")
@@ -218,6 +221,9 @@ func (m *Manager) OpenSend(name string, channel interface{}) error {
 }
 
 func (m *Manager) OpenRecv(name string, channel interface{}, bufferCap int) error {
+	if len(name) > maxNameLen {
+		return newErr("OpenRecv: name too long")
+	}
 	ch := reflect.ValueOf(channel)
 	if ch.Kind() != reflect.Chan {
 		return newErr("OpenRecv channel is not a channel")

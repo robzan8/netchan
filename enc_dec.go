@@ -273,8 +273,11 @@ func (d *decoder) run() (err error) {
 			if err != nil {
 				return
 			}
-			if cred.Amount <= 0 {
-				return newErr("credit with non-positive value received")
+			if cred.Amount < 0 {
+				return newErr("received credit with negative amount")
+			}
+			if len(cred.Name) > maxNameLen {
+				return newErr("received credit with too long net-chan name")
 			}
 			d.toSendMn <- cred
 

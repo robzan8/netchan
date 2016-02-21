@@ -20,7 +20,7 @@ type openInfo struct {
 type sendTable struct {
 	sync.Mutex
 	chans map[int]senderChans
-	info  map[hashedName]openInfo
+	info  map[string]openInfo
 }
 
 type sender struct {
@@ -139,11 +139,10 @@ func (m *sendManager) startSender(info openInfo) {
 //     In this case, open adds the entry to the pending table (we don't know the channel
 //     id yet), with 0 credit. When the message arrives, we patch the entry with the
 //     credit and move it from the pending table to the final table.
-func (m *sendManager) open(nameStr string, ch reflect.Value) error {
+func (m *sendManager) open(name string, ch reflect.Value) error {
 	m.table.Lock()
 	defer m.table.Unlock()
 
-	name := hashName(nameStr)
 	info, present := m.table.info[name]
 	if present {
 		// Initial credit already arrived.
@@ -185,21 +184,21 @@ func (m *sendManager) handleCredit(cred credit) error {
 //     attack and shut down with an error.
 
 // An initial credit arrived.
-func (m *sendManager) handleInitCred(cred credit) error {
+func (m *sendManager) handleInitCredit(cred credit) error {
 	m.table.Lock()
 	defer m.table.Unlock()
 
-	info, present := m.table.info[*cred.Name]
+	info, present := m.table.info[cred.Name]
 	if present {
 		// User already called Open(Send).
 		info.id = cred.id
 		info.initCred = cred.Amount
 		m.startSender(info)
-		delete(m.table.info, *cred.Name)
+		delete(m.table.info, cred.Name)
 		return nil
 	}
 	// User didn't call Open(Send) yet.
-	m.table.info[*cred.Name] = openInfo{id: cred.id, initCred: cred.Amount}
+	m.table.info[cred.Name] = openInfo{id: cred.id, initCred: cred.Amount}
 	return nil
 }
 
@@ -215,10 +214,10 @@ func (m *sendManager) run() {
 			// keep draining credits so that decoder doesn't block sending
 			continue
 		}
-		if cred.Name == nil {
-			err = m.handleCredit(cred)
+		if cred.Init {
+			err = m.handleInitCredit(cred)
 		} else {
-			err = m.handleInitCred(cred)
+			err = m.handleCredit(cred)
 		}
 		if err != nil {
 			go m.mn.ShutDownWith(err)
