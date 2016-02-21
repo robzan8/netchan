@@ -6,7 +6,7 @@ import (
 )
 
 type recvEntry struct {
-	buffer chan<- reflect.Value
+	buffer chan<- interface{} // chan of batches
 	name   hashedName
 }
 
@@ -19,7 +19,7 @@ type recvTable struct {
 type receiver struct {
 	id        int
 	name      hashedName
-	buffer    <-chan reflect.Value
+	buffer    <-chan interface{}
 	errSig    <-chan struct{}
 	dataChan  reflect.Value // chan<- elemType
 	toEncoder chan<- credit
@@ -56,17 +56,18 @@ func (r receiver) run() {
 	r.sendToEncoder(credit{r.id, r.bufCap, &r.name}) // initial credit
 	for !r.err {
 		select {
-		case batch, ok := <-r.buffer:
+		case batchE, ok := <-r.buffer:
 			if !ok {
 				r.dataChan.Close()
 				// recvManager deletes the entry
 				return
 			}
+			batch := reflect.ValueOf(batchE)
 			r.received++
 			select {
-			case batch2, ok := <-r.buffer:
+			case batchE2, ok := <-r.buffer:
 				if ok {
-					batch = reflect.AppendSlice(batch, batch2)
+					batch = reflect.AppendSlice(batch, reflect.ValueOf(batchE2))
 				}
 			default:
 			}
@@ -105,7 +106,7 @@ func (m *recvManager) open(nameStr string, ch reflect.Value, bufCap int) error {
 	defer m.types.Unlock()
 
 	m.newId++
-	buffer := make(chan reflect.Value, bufCap)
+	buffer := make(chan interface{}, bufCap)
 	m.table.entry[m.newId] = recvEntry{buffer, name}
 	m.table.name[name] = struct{}{}
 	m.types.elemType[m.newId] = ch.Type().Elem()
@@ -126,7 +127,7 @@ func (m *recvManager) handleUserData(id int, batch reflect.Value) error {
 	}
 
 	select {
-	case entry.buffer <- batch:
+	case entry.buffer <- batch.Interface():
 		return nil
 	default:
 		// Sending to the buffer should never be blocking.
