@@ -11,28 +11,16 @@ import (
 )
 
 type benchTask struct {
-	Type                         string // "netchan" or "gob"
 	NumChans, ItemSize, NumItems int
 }
 
 const (
-	// should agree with the ones defined in package netchan (enc_dec.go)
+	// should agree with the one defined in package netchan (enc_dec.go)
 	wantBatchSize = 512
 	wantBufSize   = 2048
 )
 
-func doBenchTask(task benchTask, mn *netchan.Manager) {
-	switch task.Type {
-	case "netchan":
-		doNetchanTask(task, mn)
-	case "gob":
-		doGobTask(task, mn)
-	default:
-		panic("Unexpected task type.")
-	}
-}
-
-func doNetchanTask(task benchTask, mn *netchan.Manager) {
+func executeTask(task benchTask, mn *netchan.Manager) {
 	item := make([]byte, task.ItemSize)
 	var wg sync.WaitGroup
 	chCap := wantBatchSize / task.ItemSize
