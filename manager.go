@@ -6,7 +6,6 @@ package netchan
 - update docs
 - draw graph documenting components
 - debug logger, "want to send" msg
-- count num of items arriving, must not exceed credit
 - tune desired batch size
 - adjust ShutDown timeout
 */
