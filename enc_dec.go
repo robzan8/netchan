@@ -10,10 +10,10 @@ import (
 )
 
 const (
-	dataMsg int = iota
-	helloMsg
-	closeMsg
+	helloMsg int = iota
+	dataMsg
 	creditMsg
+	closeMsg
 	errorMsg
 	netErrorMsg
 
@@ -121,17 +121,23 @@ func (e *encoder) handleData(data userData) {
 }
 
 func (e *encoder) bufAndFlush() {
-Loop:
-	for i := 0; i < cap(e.dataCh)+cap(e.credits); i++ {
-		//TODO: this select shows up in profiles
+CreditsLoop:
+	for i := 0; i < cap(e.credits); i++ {
 		select {
-		case data := <-e.dataCh:
-			e.handleData(data)
 		case cred := <-e.credits:
 			e.encode(header{creditMsg, cred.id})
 			e.encode(cred)
 		default:
-			break Loop
+			break CreditsLoop
+		}
+	}
+DataLoop:
+	for i := 0; i < cap(e.dataCh); i++ {
+		select {
+		case data := <-e.dataCh:
+			e.handleData(data)
+		default:
+			break DataLoop
 		}
 	}
 	e.flush()
