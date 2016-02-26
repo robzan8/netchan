@@ -35,8 +35,7 @@ type sender struct {
 	batchLen  *int32
 }
 
-func (s *sender) sendToEncoder(batch reflect.Value) (err bool) {
-	data := userData{s.id, batch, s.batchLen}
+func (s *sender) sendToEncoder(data userData) (err bool) {
 	// Simply sending to the encoder leads to deadlocks,
 	// keep processing credits
 	for {
@@ -57,6 +56,7 @@ func (s sender) run() {
 	s.batchLen = new(int32)
 	*s.batchLen = 1
 	batchType := reflect.SliceOf(s.dataChan.Type().Elem())
+	s.sendToEncoder(userData{id: s.id, Init: true})
 
 	recvSomething := [3]reflect.SelectCase{
 		{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(s.credits)},
@@ -84,7 +84,7 @@ func (s sender) run() {
 			return
 		case recvData:
 			if !ok {
-				s.sendToEncoder(reflect.Value{}) // end of stream
+				s.sendToEncoder(userData{id: s.id, Close: true})
 				s.table.Lock()
 				delete(s.table.chans, s.id)
 				s.table.Unlock()
@@ -102,7 +102,7 @@ func (s sender) run() {
 				s.credit--
 				batch = reflect.Append(batch, val)
 			}
-			err := s.sendToEncoder(batch)
+			err := s.sendToEncoder(userData{id: s.id, batch: batch, batchLen: s.batchLen})
 			if err {
 				return
 			}

@@ -12,8 +12,9 @@ import (
 const (
 	helloMsg int = iota
 	dataMsg
-	creditMsg
+	wantToSendMsg
 	closeMsg
+	creditMsg
 	errorMsg
 	netErrorMsg
 
@@ -93,7 +94,11 @@ func (e *encoder) flush() {
 const wantBatchSize = 512
 
 func (e *encoder) handleData(data userData) {
-	if data.batch == (reflect.Value{}) {
+	if data.Init {
+		e.encode(header{wantToSendMsg, data.id})
+		return
+	}
+	if data.Close {
 		e.encode(header{closeMsg, data.id})
 		return
 	}
@@ -256,9 +261,12 @@ func (d *decoder) run() (err error) {
 			return
 		}
 		switch h.MsgType {
+		case helloMsg:
+			return newErr("hello message received again")
+
 		case dataMsg:
 			d.types.Lock()
-			elemType, present := d.types.elemType[h.Id]
+			elemType, present := d.types.elemType[h.Id] // make sliceType directly
 			d.types.Unlock()
 			if !present {
 				return fmtErr("message with invalid ID received (%d)\n", h.Id)
@@ -268,10 +276,13 @@ func (d *decoder) run() (err error) {
 			if err != nil {
 				return
 			}
-			d.toRecvMn <- userData{h.Id, batch, nil}
+			d.toRecvMn <- userData{id: h.Id, batch: batch}
+
+		case wantToSendMsg:
+			// log
 
 		case closeMsg:
-			d.toRecvMn <- userData{h.Id, reflect.Value{}, nil}
+			d.toRecvMn <- userData{id: h.Id, Close: true}
 
 		case creditMsg:
 			cred := credit{id: h.Id}

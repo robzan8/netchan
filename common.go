@@ -13,15 +13,16 @@ var EndOfSession = errors.New("netchan: end of session")
 type hello struct{}
 
 type userData struct {
-	id       int
-	batch    reflect.Value // if zero, represents end of stream
-	batchLen *int32
+	id          int
+	Init, Close bool
+	batch       reflect.Value
+	batchLen    *int32
 }
 
 type credit struct {
 	id     int
-	Amount int
 	Init   bool
+	Amount int
 	Name   string
 }
 

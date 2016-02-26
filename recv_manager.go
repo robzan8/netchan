@@ -103,7 +103,7 @@ func (r *receiver) sendToEncoder(cred credit) (err bool) {
 }
 
 func (r receiver) run() {
-	r.sendToEncoder(credit{r.id, r.bufCap, true, r.name}) // initial credit
+	r.sendToEncoder(credit{r.id, true, r.bufCap, r.name}) // initial credit
 	for !r.err {
 		batch, ok, err := r.buf.get()
 		if err {
@@ -115,7 +115,7 @@ func (r receiver) run() {
 			return
 		}
 		batchLen := batch.Len()
-		r.sendToEncoder(credit{r.id, batchLen, false, ""})
+		r.sendToEncoder(credit{r.id, false, batchLen, ""})
 		for i := 0; i < batchLen; i++ {
 			r.sendToUser(batch.Index(i))
 		}
@@ -156,7 +156,6 @@ func (m *recvManager) open(name string, ch reflect.Value, bufCap int) error {
 }
 
 // Got an element from the decoder.
-// if data is nil, we got endOfStream
 func (m *recvManager) handleUserData(id int, batch reflect.Value) error {
 	m.table.Lock()
 	entry, present := m.table.entry[id]
@@ -167,7 +166,7 @@ func (m *recvManager) handleUserData(id int, batch reflect.Value) error {
 	return entry.buf.put(batch)
 }
 
-func (m *recvManager) handleEOS(id int) error {
+func (m *recvManager) handleClose(id int) error {
 	m.table.Lock()
 	entry, present := m.table.entry[id]
 	if !present {
@@ -197,8 +196,8 @@ func (m *recvManager) run() {
 			// keep draining bla bla
 			continue
 		}
-		if data.batch == (reflect.Value{}) {
-			err = m.handleEOS(data.id)
+		if data.Close {
+			err = m.handleClose(data.id)
 		} else {
 			err = m.handleUserData(data.id, data.batch)
 		}
