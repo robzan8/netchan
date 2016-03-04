@@ -103,7 +103,7 @@ func (r *receiver) sendToEncoder(cred credit) (err bool) {
 }
 
 func (r receiver) run() {
-	r.sendToEncoder(credit{r.id, true, r.bufCap, r.name}) // initial credit
+	r.sendToEncoder(credit{Init: true, id: r.id, Name: r.name, Amount: r.bufCap})
 	for !r.err {
 		batch, ok, err := r.buf.get()
 		if err {
@@ -115,7 +115,7 @@ func (r receiver) run() {
 			return
 		}
 		batchLen := batch.Len()
-		r.sendToEncoder(credit{r.id, false, batchLen, ""})
+		r.sendToEncoder(credit{id: r.id, Amount: batchLen})
 		for i := 0; i < batchLen; i++ {
 			r.sendToUser(batch.Index(i))
 		}

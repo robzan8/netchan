@@ -13,17 +13,18 @@ var EndOfSession = errors.New("netchan: end of session")
 type hello struct{}
 
 type userData struct {
-	id          int
 	Init, Close bool
+	id          int
+	Name        string
 	batch       reflect.Value
 	batchLen    *int32
 }
 
 type credit struct {
-	id     int
 	Init   bool
-	Amount int
+	id     int
 	Name   string
+	Amount int
 }
 
 func newErr(str string) error {

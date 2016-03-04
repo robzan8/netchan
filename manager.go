@@ -14,6 +14,7 @@ import (
 	"bufio"
 	"encoding/gob"
 	"io"
+	"net"
 	"reflect"
 	"sync/atomic"
 	"time"
@@ -52,6 +53,7 @@ func (o *once) Do(f func()) {
 // A Manager handles the message traffic of its connection, implementing the netchan
 // protocol.
 type Manager struct {
+	id     int64
 	conn   io.ReadWriteCloser
 	recvMn *recvManager
 	sendMn *sendManager
@@ -134,15 +136,18 @@ type bufWriter interface {
 	Flush() error
 }
 
+var managerId int64
+
 func ManageLimit(conn io.ReadWriteCloser, msgSizeLimit int) *Manager {
 	if msgSizeLimit < minMsgSizeLimit {
 		msgSizeLimit = minMsgSizeLimit
 	}
 
 	// create all the components, connect them with channels and fire up the goroutines.
+	mnId := atomic.AddInt64(&managerId, 1)
 	recvMn := new(recvManager)
 	sendMn := new(sendManager)
-	mn := &Manager{conn: conn, recvMn: recvMn, sendMn: sendMn}
+	mn := &Manager{id: mnId, conn: conn, recvMn: recvMn, sendMn: sendMn}
 	mn.errOnce.done = make(chan struct{})
 	mn.closeOnce.done = make(chan struct{})
 
@@ -183,6 +188,18 @@ func ManageLimit(conn io.ReadWriteCloser, msgSizeLimit int) *Manager {
 	go sendMn.run()
 	go enc.run()
 	go dec.run()
+
+	netConn, ok := conn.(net.Conn)
+	if ok {
+		logDebug("manager %d started on connection (local %s, remote %s)",
+			mnId, netConn.LocalAddr(), netConn.RemoteAddr())
+	} else {
+		logDebug("manager %d started", mnId)
+	}
+	go func() {
+		<-mn.ErrorSignal()
+		logDebug("manager %d shut down with error: %s", mnId, mn.Error())
+	}()
 	return mn
 }
 

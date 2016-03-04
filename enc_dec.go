@@ -121,7 +121,10 @@ func (e *encoder) handleData(data userData) {
 	}
 	batchLen := float32(*data.batchLen)
 	if batchLen < wantBatchLen*0.75 || batchLen > wantBatchLen*1.25 {
-		atomic.StoreInt32(data.batchLen, int32(wantBatchLen+0.5))
+		intLen := int32(wantBatchLen + 0.5)
+		atomic.StoreInt32(data.batchLen, intLen)
+		logDebug("manager %d, channel send-%d: batch length changed to %d",
+			e.mn.id, data.id, intLen)
 	}
 }
 
