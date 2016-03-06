@@ -2,12 +2,14 @@ package netchan
 
 /* TODO:
 - more tests
-- fuzzy testing
 - update docs
+- ShutDown and EndOfSession should have same name?
 - draw graph documenting components
-- debug logger, "want to send" msg
+- debug logger
 - tune desired batch size
 - adjust ShutDown timeout
+- limit half-open channels
+- Manager is Context!!!!!!!!
 */
 
 import (

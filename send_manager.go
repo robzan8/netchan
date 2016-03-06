@@ -25,17 +25,20 @@ type sendTable struct {
 
 type sender struct {
 	id        int
+	name      string
+	mn        *Manager
 	dataChan  reflect.Value // <-chan T
 	credits   <-chan int
-	errSig    <-chan struct{}
 	toEncoder chan<- userData
 	quit      chan<- struct{}
 	table     *sendTable // table of the send manager
-	credit    int
-	batchLen  *int32
+
+	credit        int
+	batchLenStats stats
+	creditStats   stats
 }
 
-func (s *sender) sendToEncoder(data userData) (err bool) {
+func (s *sender) sendToEncoder(data userData) {
 	// Simply sending to the encoder leads to deadlocks,
 	// keep processing credits
 	for {
@@ -43,24 +46,29 @@ func (s *sender) sendToEncoder(data userData) (err bool) {
 		case s.toEncoder <- data:
 			return
 		case cred := <-s.credits:
+			s.creditStats.update(float64(cred))
 			s.credit += cred
-		case <-s.errSig:
-			err = true
+		case <-s.mn.ErrorSignal():
 			return
 		}
 	}
 }
 
-func (s sender) run() {
-	defer close(s.quit)
-	s.batchLen = new(int32)
-	*s.batchLen = 1
+func (s *sender) run() {
 	batchType := reflect.SliceOf(s.dataChan.Type().Elem())
-	s.sendToEncoder(userData{id: s.id, Init: true})
+	batchLenPt := new(int64)
+	*batchLenPt = 1
+	defer func() {
+		logDebug("manager %d: channel send%d closed.\n"+
+			"\tlength of batches stats: %s\n\tcredit messages stats: %s",
+			s.mn.id, s.id, &s.batchLenStats, &s.creditStats)
+		close(s.quit)
+	}()
+	s.sendToEncoder(userData{header: header{initDataMsg, s.id, s.name}})
 
 	recvSomething := [3]reflect.SelectCase{
 		{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(s.credits)},
-		{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(s.errSig)},
+		{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(s.mn.ErrorSignal())},
 		{Dir: reflect.SelectRecv, Chan: s.dataChan},
 	}
 	const (
@@ -79,21 +87,23 @@ func (s sender) run() {
 		caseI, val, ok := reflect.Select(recvSomething[0:numCases])
 		switch caseI {
 		case recvCredit:
-			s.credit += int(val.Int())
+			cred := val.Int()
+			s.creditStats.update(float64(cred))
+			s.credit += int(cred)
 		case recvError:
 			return
 		case recvData:
 			if !ok {
-				s.sendToEncoder(userData{id: s.id, Close: true})
+				s.sendToEncoder(userData{header: header{closeMsg, s.id, ""}})
 				s.table.Lock()
 				delete(s.table.chans, s.id)
 				s.table.Unlock()
 				return
 			}
 			s.credit--
-			batchLen := int(atomic.LoadInt32(s.batchLen))
 			batch := reflect.MakeSlice(batchType, 1, 1)
 			batch.Index(0).Set(val)
+			batchLen := int(atomic.LoadInt64(batchLenPt))
 			for i := 1; i < batchLen && s.credit > 0; i++ {
 				val, ok := s.dataChan.TryRecv()
 				if !ok { // no items available or channel closed
@@ -102,10 +112,8 @@ func (s sender) run() {
 				s.credit--
 				batch = reflect.Append(batch, val)
 			}
-			err := s.sendToEncoder(userData{id: s.id, batch: batch, batchLen: s.batchLen})
-			if err {
-				return
-			}
+			s.batchLenStats.update(float64(batch.Len()))
+			s.sendToEncoder(userData{header{dataMsg, s.id, ""}, batch, batchLenPt})
 		}
 	}
 }
@@ -117,14 +125,14 @@ type sendManager struct {
 	mn        *Manager
 }
 
-func (m *sendManager) startSender(info openInfo) {
+func (m *sendManager) startSender(name string, info openInfo) {
 	credits := make(chan int)
 	quit := make(chan struct{})
 	// table is locked
 	m.table.chans[info.id] = senderChans{credits, quit}
 
-	go sender{info.id, info.dataChan, credits, m.mn.ErrorSignal(),
-		m.toEncoder, quit, &m.table, info.initCred, nil}.run()
+	go (&sender{info.id, name, m.mn, info.dataChan, credits,
+		m.toEncoder, quit, &m.table, info.initCred, stats{}, stats{}}).run()
 }
 
 // Open a net-chan for sending.
@@ -147,7 +155,7 @@ func (m *sendManager) open(name string, ch reflect.Value) error {
 	if present {
 		// Initial credit already arrived.
 		info.dataChan = ch
-		m.startSender(info)
+		m.startSender(name, info)
 		delete(m.table.info, name)
 		return nil
 	}
@@ -159,7 +167,7 @@ func (m *sendManager) open(name string, ch reflect.Value) error {
 // Got a credit from the decoder.
 func (m *sendManager) handleCredit(cred credit) error {
 	m.table.Lock()
-	chans, present := m.table.chans[cred.id]
+	chans, present := m.table.chans[cred.Id]
 	m.table.Unlock()
 	if !present {
 		// It may happen that the entry is not present,
@@ -169,7 +177,7 @@ func (m *sendManager) handleCredit(cred credit) error {
 
 	// If it's not shutting down, the sender is always ready to receive credit.
 	select {
-	case chans.credits <- cred.Amount:
+	case chans.credits <- cred.amount:
 	case <-chans.quit: // net-chan closed or error occurred
 	}
 	return nil
@@ -191,36 +199,33 @@ func (m *sendManager) handleInitCredit(cred credit) error {
 	info, present := m.table.info[cred.Name]
 	if present {
 		// User already called Open(Send).
-		info.id = cred.id
-		info.initCred = cred.Amount
-		m.startSender(info)
+		info.id = cred.Id
+		info.initCred = cred.amount
+		m.startSender(cred.Name, info)
 		delete(m.table.info, cred.Name)
 		return nil
 	}
 	// User didn't call Open(Send) yet.
-	m.table.info[cred.Name] = openInfo{id: cred.id, initCred: cred.Amount}
+	m.table.info[cred.Name] = openInfo{id: cred.Id, initCred: cred.amount}
 	return nil
 }
 
 func (m *sendManager) run() {
-	for {
-		cred, ok := <-m.credits
-		if !ok {
-			// An error occurred and decoder shut down.
-			return
-		}
+	for cred := range m.credits {
 		err := m.mn.Error()
 		if err != nil {
 			// keep draining credits so that decoder doesn't block sending
 			continue
 		}
-		if cred.Init {
-			err = m.handleInitCredit(cred)
-		} else {
+		switch cred.Type {
+		case creditMsg:
 			err = m.handleCredit(cred)
+		case initCreditMsg:
+			err = m.handleInitCredit(cred)
 		}
 		if err != nil {
 			go m.mn.ShutDownWith(err)
 		}
 	}
+	// An error occurred and decoder shut down.
 }

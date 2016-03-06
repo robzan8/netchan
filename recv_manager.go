@@ -70,41 +70,36 @@ type recvTable struct {
 type receiver struct {
 	id        int
 	name      string
+	mn        *Manager
 	buf       *buffer
-	errSig    <-chan struct{}
 	dataChan  reflect.Value // chan<- elemType
 	toEncoder chan<- credit
-	bufCap    int
-	err       bool
 }
 
-func (r *receiver) sendToUser(val reflect.Value) (err bool) {
-	// Fast path: try sending without involving errSig.
+func (r *receiver) sendToUser(val reflect.Value) {
+	// Fast path: try sending without involving ErrorSignal.
 	ok := r.dataChan.TrySend(val)
 	if ok {
 		return
 	}
 	// Slow path, must use reflect.Select
-	sendAndError := [2]reflect.SelectCase{
+	sendOrErr := [...]reflect.SelectCase{
 		{Dir: reflect.SelectSend, Chan: r.dataChan, Send: val},
-		{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(r.errSig)},
+		{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(r.mn.ErrorSignal())},
 	}
-	i, _, _ := reflect.Select(sendAndError[:])
-	return i == 1
+	reflect.Select(sendOrErr[:])
 }
 
-func (r *receiver) sendToEncoder(cred credit) (err bool) {
+func (r *receiver) sendToEncoder(cred credit) {
 	select {
 	case r.toEncoder <- cred:
-	case <-r.errSig:
-		err = true
+	case <-r.mn.ErrorSignal():
 	}
-	return
 }
 
-func (r receiver) run() {
-	r.sendToEncoder(credit{Init: true, id: r.id, Name: r.name, Amount: r.bufCap})
-	for !r.err {
+func (r *receiver) run() {
+	r.sendToEncoder(credit{header{initCreditMsg, r.id, r.name}, int(r.buf.cap)})
+	for {
 		batch, ok, err := r.buf.get()
 		if err {
 			return
@@ -115,7 +110,7 @@ func (r receiver) run() {
 			return
 		}
 		batchLen := batch.Len()
-		r.sendToEncoder(credit{id: r.id, Amount: batchLen})
+		r.sendToEncoder(credit{header{creditMsg, r.id, ""}, batchLen})
 		for i := 0; i < batchLen; i++ {
 			r.sendToUser(batch.Index(i))
 		}
@@ -150,8 +145,7 @@ func (m *recvManager) open(name string, ch reflect.Value, bufCap int) error {
 	m.table.present[name] = struct{}{}
 	m.types.elemType[m.newId] = ch.Type().Elem()
 
-	go receiver{m.newId, name, buf, m.mn.ErrorSignal(),
-		ch, m.toEncoder, bufCap, false}.run()
+	go (&receiver{m.newId, name, m.mn, buf, ch, m.toEncoder}).run()
 	return nil
 }
 
@@ -185,24 +179,23 @@ func (m *recvManager) handleClose(id int) error {
 }
 
 func (m *recvManager) run() {
-	for {
-		data, ok := <-m.dataChan
-		if !ok {
-			// An error occurred and decoder shut down.
-			return
-		}
+	for data := range m.dataChan {
 		err := m.mn.Error()
 		if err != nil {
-			// keep draining bla bla
+			// keep draining dataChan so that decoder doesn't block sending
 			continue
 		}
-		if data.Close {
-			err = m.handleClose(data.id)
-		} else {
-			err = m.handleUserData(data.id, data.batch)
+		switch data.Type {
+		case dataMsg:
+			err = m.handleUserData(data.Id, data.batch)
+		case initDataMsg:
+			// log
+		case closeMsg:
+			err = m.handleClose(data.Id)
 		}
 		if err != nil {
 			go m.mn.ShutDownWith(err)
 		}
 	}
+	// An error occurred and decoder shut down.
 }

@@ -10,21 +10,38 @@ import (
 // (typically with Manager.ShutDown).
 var EndOfSession = errors.New("netchan: end of session")
 
+type msgType int
+
+const (
+	helloMsg msgType = iota
+	dataMsg
+	initDataMsg
+	closeMsg
+	creditMsg
+	initCreditMsg
+	errorMsg
+
+	lastReservedMsg = 15
+)
+
+// preceedes every message
+type header struct {
+	Type msgType
+	Id   int
+	Name string
+}
+
 type hello struct{}
 
 type userData struct {
-	Init, Close bool
-	id          int
-	Name        string
-	batch       reflect.Value
-	batchLen    *int32
+	header
+	batch      reflect.Value
+	batchLenPt *int64
 }
 
 type credit struct {
-	Init   bool
-	id     int
-	Name   string
-	Amount int
+	header
+	amount int
 }
 
 func newErr(str string) error {
