@@ -23,7 +23,7 @@ func (c *countWriter) Write(data []byte) (n int, err error) {
 type encoder struct {
 	dataCh  <-chan userData
 	credits <-chan credit
-	mn      *Manager
+	mn      *Session
 	flushFn func() error
 	countWr countWriter
 	enc     *gob.Encoder
@@ -101,7 +101,7 @@ DataLoop:
 }
 
 func (e *encoder) run() {
-	errorSignal := e.mn.ErrorSignal()
+	errorSignal := e.mn.Done()
 
 	e.encode(header{Type: helloMsg})
 	e.encode(hello{})
@@ -109,7 +109,7 @@ func (e *encoder) run() {
 Loop:
 	for {
 		if e.err != nil {
-			e.mn.ShutDownWith(e.err)
+			e.mn.QuitWith(e.err)
 			return
 		}
 		select {
@@ -125,7 +125,7 @@ Loop:
 	}
 
 	e.encode(header{Type: errorMsg})
-	e.encode(e.mn.Error().Error())
+	e.encode(e.mn.Err().Error())
 	e.flush()
 	e.mn.closeConn()
 }
@@ -160,7 +160,7 @@ type decoder struct {
 	toRecvMn     chan<- userData
 	toSendMn     chan<- credit
 	types        typeTable // updated by recvManager
-	mn           *Manager
+	mn           *Session
 	msgSizeLimit int
 	limitedRd    limitedReader
 	dec          *gob.Decoder
@@ -180,7 +180,7 @@ func (d *decoder) run() (err error) {
 	defer func() {
 		close(d.toRecvMn)
 		close(d.toSendMn)
-		d.mn.ShutDownWith(err)
+		d.mn.QuitWith(err)
 	}()
 
 	var h header
@@ -197,7 +197,7 @@ func (d *decoder) run() (err error) {
 		return
 	}
 	for {
-		if err = d.mn.Error(); err != nil {
+		if err = d.mn.Err(); err != nil {
 			return
 		}
 		var h header
@@ -224,7 +224,10 @@ func (d *decoder) run() (err error) {
 			d.toRecvMn <- userData{header: h, batch: batch}
 
 		case initDataMsg:
-			// log
+			d.toRecvMn <- userData{header: h}
+			// move this:
+			logDebug("netchan session %d: peer wants to send on channel %s",
+				d.mn.id, h.Name)
 
 		case closeMsg:
 			d.toRecvMn <- userData{header: h}

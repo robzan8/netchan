@@ -35,7 +35,7 @@ func init() {
 }
 
 // intProducer sends integers from 0 to n-1 on net-chan chName
-func intProducer(t *testing.T, mn *netchan.Manager, chName string, n int) {
+func intProducer(t *testing.T, mn *netchan.Session, chName string, n int) {
 	go func() {
 		ch := make(chan int, 15)
 		err := mn.OpenSend(chName, ch)
@@ -45,8 +45,8 @@ func intProducer(t *testing.T, mn *netchan.Manager, chName string, n int) {
 		for i := 0; i < n; i++ {
 			select {
 			case ch <- i:
-			case <-mn.ErrorSignal():
-				log.Fatal(mn.Error())
+			case <-mn.Done():
+				log.Fatal(mn.Err())
 			}
 		}
 		close(ch)
@@ -55,7 +55,7 @@ func intProducer(t *testing.T, mn *netchan.Manager, chName string, n int) {
 
 // intConsumer drains net-chan chName, stores the received integers in a slice
 // and delivers the slice on a channel, which is returned
-func intConsumer(t *testing.T, mn *netchan.Manager, chName string) <-chan []int {
+func intConsumer(t *testing.T, mn *netchan.Session, chName string) <-chan []int {
 	sliceCh := make(chan []int, 1)
 	go func() {
 		var slice []int
@@ -72,8 +72,8 @@ func intConsumer(t *testing.T, mn *netchan.Manager, chName string) <-chan []int 
 					break Loop
 				}
 				slice = append(slice, i)
-			case <-mn.ErrorSignal():
-				log.Fatal(mn.Error())
+			case <-mn.Done():
+				log.Fatal(mn.Err())
 			}
 		}
 		sliceCh <- slice
@@ -94,26 +94,26 @@ func checkIntSlice(t *testing.T, s []int) {
 // start the producer before the consumer
 func TestSendThenRecv(t *testing.T) {
 	sideA, sideB := newPipeConn()
-	intProducer(t, netchan.Manage(sideA), "integers", 100)
+	intProducer(t, netchan.NewSession(sideA), "integers", 100)
 	time.Sleep(50 * time.Millisecond)
-	s := <-intConsumer(t, netchan.Manage(sideB), "integers")
+	s := <-intConsumer(t, netchan.NewSession(sideB), "integers")
 	checkIntSlice(t, s)
 }
 
 // start the consumer before the producer
 func TestRecvThenSend(t *testing.T) {
 	sideA, sideB := newPipeConn()
-	sliceCh := intConsumer(t, netchan.Manage(sideB), "integers")
+	sliceCh := intConsumer(t, netchan.NewSession(sideB), "integers")
 	time.Sleep(50 * time.Millisecond)
-	intProducer(t, netchan.Manage(sideA), "integers", 100)
+	intProducer(t, netchan.NewSession(sideA), "integers", 100)
 	checkIntSlice(t, <-sliceCh)
 }
 
 // open many chans in both directions
 func TestManyChans(t *testing.T) {
 	sideA, sideB := newPipeConn()
-	manA := netchan.Manage(sideA)
-	manB := netchan.Manage(sideB)
+	manA := netchan.NewSession(sideA)
+	manB := netchan.NewSession(sideB)
 	var sliceChans [100]<-chan []int
 	for i := range sliceChans {
 		chName := "integers" + strconv.Itoa(i)
@@ -138,8 +138,8 @@ func TestManyChans(t *testing.T) {
 // TODO: find a better way of testing this
 func TestCredits(t *testing.T) {
 	sideA, sideB := newPipeConn()
-	intProducer(t, netchan.Manage(sideA), "integers", 1000)
-	s := <-intConsumer(t, netchan.Manage(sideB), "integers")
+	intProducer(t, netchan.NewSession(sideA), "integers", 1000)
+	s := <-intConsumer(t, netchan.NewSession(sideB), "integers")
 	checkIntSlice(t, s)
 }
 
@@ -156,7 +156,7 @@ const (
 
 // sliceProducer sends on "slices". The last slice will be too big.
 func sliceProducer(t *testing.T, conn io.ReadWriteCloser) {
-	mn := netchan.Manage(conn)
+	mn := netchan.NewSession(conn)
 	ch := make(chan []byte, 1)
 	err := mn.OpenSend("slices", ch)
 	if err != nil {
@@ -171,8 +171,8 @@ func sliceProducer(t *testing.T, conn io.ReadWriteCloser) {
 		}
 		select {
 		case ch <- slice:
-		case <-mn.ErrorSignal():
-			log.Fatal(mn.Error())
+		case <-mn.Done():
+			log.Fatal(mn.Err())
 		}
 	}
 	close(ch)
@@ -182,7 +182,7 @@ func sliceProducer(t *testing.T, conn io.ReadWriteCloser) {
 // and must generate an error that matches the one returned by the limitedReader used by
 // the decoder
 func sliceConsumer(t *testing.T, conn io.ReadWriteCloser) {
-	mn := netchan.ManageLimit(conn, limit)
+	mn := netchan.NewSessionLimit(conn, limit)
 	// use a receive buffer with capacity 1, so that items come
 	// one at a time and we get the error for the last one only
 	ch := make(chan []byte)
@@ -194,8 +194,8 @@ func sliceConsumer(t *testing.T, conn io.ReadWriteCloser) {
 		if i < numSlices {
 			select {
 			case <-ch:
-			case <-mn.ErrorSignal():
-				log.Fatal(mn.Error())
+			case <-mn.Done():
+				log.Fatal(mn.Err())
 			}
 			continue
 		}
@@ -203,8 +203,8 @@ func sliceConsumer(t *testing.T, conn io.ReadWriteCloser) {
 		select {
 		case <-ch:
 			log.Fatal("manager did not block too big message")
-		case <-mn.ErrorSignal():
-			err := mn.Error()
+		case <-mn.Done():
+			err := mn.Err()
 			if strings.Contains(err.Error(), "too big") {
 				return // success
 			}

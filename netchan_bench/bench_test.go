@@ -15,7 +15,7 @@ import (
 )
 
 var (
-	mn    *netchan.Manager
+	mn    *netchan.Session
 	tasks = make(chan benchTask)
 	done  = make(chan struct{})
 )
@@ -63,11 +63,11 @@ func TestMain(m *testing.M) {
 	conn, err := ln.Accept()
 	check(err)
 	ln.Close()
-	mn = netchan.Manage(conn)
+	mn = netchan.NewSession(conn)
 	go func() {
-		<-mn.ErrorSignal()
-		if err := mn.Error(); err != netchan.EndOfSession {
-			mn.ShutDown()
+		<-mn.Done()
+		if err := mn.Err(); err != netchan.EndOfSession {
+			mn.Quit()
 			log.Fatal(err)
 		}
 	}()
@@ -80,9 +80,9 @@ func TestMain(m *testing.M) {
 
 	close(tasks)
 	// wait that peer shuts down
-	<-mn.ErrorSignal()
+	<-mn.Done()
 	// wait that local shut down completes
-	mn.ShutDown()
+	mn.Quit()
 	os.Exit(exitCode)
 }
 

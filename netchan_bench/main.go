@@ -20,7 +20,7 @@ const (
 	wantBufSize   = 2048
 )
 
-func executeTask(task benchTask, mn *netchan.Manager) {
+func executeTask(task benchTask, mn *netchan.Session) {
 	item := make([]byte, task.ItemSize)
 	var wg sync.WaitGroup
 	chCap := wantBatchSize / task.ItemSize
@@ -67,11 +67,11 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	mn := netchan.Manage(conn)
+	mn := netchan.NewSession(conn)
 	go func() {
-		<-mn.ErrorSignal()
-		if err := mn.Error(); err != netchan.EndOfSession {
-			mn.ShutDown()
+		<-mn.Done()
+		if err := mn.Err(); err != netchan.EndOfSession {
+			mn.Quit()
 			os.Exit(1)
 		}
 	}()
@@ -90,5 +90,5 @@ func main() {
 		executeTask(t, mn)
 		done <- struct{}{}
 	}
-	mn.ShutDown()
+	mn.Quit()
 }

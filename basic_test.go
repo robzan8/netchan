@@ -8,9 +8,9 @@ import (
 	"github.com/robzan8/netchan"
 )
 
-func checkErrors(mn *netchan.Manager) {
-	<-mn.ErrorSignal()
-	if err := mn.Error(); err != netchan.EndOfSession {
+func checkErrors(mn *netchan.Session) {
+	<-mn.Done()
+	if err := mn.Err(); err != netchan.EndOfSession {
 		log.Fatal(err)
 	}
 }
@@ -23,7 +23,7 @@ type request struct {
 // emitIntegers sends the integers from 1 to n on net-chan "integers".
 // conn would normally be a TCP-like connection to the other peer.
 func client(conn io.ReadWriteCloser) {
-	mn := netchan.Manage(conn)
+	mn := netchan.NewSession(conn)
 	go checkErrors(mn)
 
 	reqCh := make(chan request, 1)
@@ -42,12 +42,12 @@ func client(conn io.ReadWriteCloser) {
 		fmt.Printf("%d ", i)
 	}
 
-	mn.ShutDown()
+	mn.Quit()
 }
 
 // sumIntegers receives the integers from net-chan "integers" and returns their sum.
 func server(conn io.ReadWriteCloser) {
-	mn := netchan.Manage(conn)
+	mn := netchan.NewSession(conn)
 	go checkErrors(mn)
 
 	reqCh := make(chan request, 1)

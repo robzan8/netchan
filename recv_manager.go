@@ -61,16 +61,21 @@ type recvEntry struct {
 	name string
 }
 
+type chanState struct {
+	isOpenLocal, isOpenRemote bool
+	id                        int
+}
+
 type recvTable struct {
 	sync.Mutex
 	entry   map[int]recvEntry
-	present map[string]struct{}
+	chState map[string]chanState
 }
 
 type receiver struct {
 	id        int
 	name      string
-	mn        *Manager
+	mn        *Session
 	buf       *buffer
 	dataChan  reflect.Value // chan<- elemType
 	toEncoder chan<- credit
@@ -85,7 +90,7 @@ func (r *receiver) sendToUser(val reflect.Value) {
 	// Slow path, must use reflect.Select
 	sendOrErr := [...]reflect.SelectCase{
 		{Dir: reflect.SelectSend, Chan: r.dataChan, Send: val},
-		{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(r.mn.ErrorSignal())},
+		{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(r.mn.Done())},
 	}
 	reflect.Select(sendOrErr[:])
 }
@@ -93,7 +98,7 @@ func (r *receiver) sendToUser(val reflect.Value) {
 func (r *receiver) sendToEncoder(cred credit) {
 	select {
 	case r.toEncoder <- cred:
-	case <-r.mn.ErrorSignal():
+	case <-r.mn.Done():
 	}
 }
 
@@ -122,7 +127,7 @@ type recvManager struct {
 	toEncoder chan<- credit   // credits
 	table     recvTable
 	types     *typeTable // decoder's
-	mn        *Manager
+	mn        *Session
 	newId     int
 }
 
@@ -131,7 +136,7 @@ func (m *recvManager) open(name string, ch reflect.Value, bufCap int) error {
 	m.table.Lock()
 	defer m.table.Unlock()
 
-	_, present := m.table.present[name]
+	_, present := m.table.isOpen[name]
 	if present {
 		return errAlreadyOpen("Recv", name)
 	}
@@ -140,9 +145,9 @@ func (m *recvManager) open(name string, ch reflect.Value, bufCap int) error {
 	defer m.types.Unlock()
 
 	m.newId++
-	buf := newBuffer(bufCap, m.mn.ErrorSignal())
+	buf := newBuffer(bufCap, m.mn.Done())
 	m.table.entry[m.newId] = recvEntry{buf, name}
-	m.table.present[name] = struct{}{}
+	m.table.isOpen[name] = struct{}{}
 	m.types.elemType[m.newId] = ch.Type().Elem()
 
 	go (&receiver{m.newId, name, m.mn, buf, ch, m.toEncoder}).run()
@@ -160,6 +165,27 @@ func (m *recvManager) handleUserData(id int, batch reflect.Value) error {
 	return entry.buf.put(batch)
 }
 
+func (m *recvManager) handleInitData(chName string) error {
+	m.table.Lock()
+	s := m.table.chState[chName]
+	if s.isOpenRemote {
+		m.table.Unlock()
+		return newErr("initial data received twice for the same channel")
+	}
+	s.isOpenRemote = true
+	m.table.chState[chName] = s
+	m.table.Unlock()
+
+	if s.isOpenLocal {
+		logDebug("netchan session %d: channel %s opened as recv%d",
+			m.mn.id, chName, s.chId)
+	} else {
+		logDebug("netchan session %d: peer wants to send on channel %s",
+			m.mn.id, chName)
+	}
+	return nil
+}
+
 func (m *recvManager) handleClose(id int) error {
 	m.table.Lock()
 	entry, present := m.table.entry[id]
@@ -169,7 +195,7 @@ func (m *recvManager) handleClose(id int) error {
 	}
 	m.types.Lock()
 	delete(m.table.entry, id)
-	delete(m.table.present, entry.name)
+	delete(m.table.isOpen, entry.name)
 	delete(m.types.elemType, id)
 	m.types.Unlock()
 	m.table.Unlock()
@@ -180,7 +206,7 @@ func (m *recvManager) handleClose(id int) error {
 
 func (m *recvManager) run() {
 	for data := range m.dataChan {
-		err := m.mn.Error()
+		err := m.mn.Err()
 		if err != nil {
 			// keep draining dataChan so that decoder doesn't block sending
 			continue
@@ -194,7 +220,7 @@ func (m *recvManager) run() {
 			err = m.handleClose(data.Id)
 		}
 		if err != nil {
-			go m.mn.ShutDownWith(err)
+			go m.mn.QuitWith(err)
 		}
 	}
 	// An error occurred and decoder shut down.
