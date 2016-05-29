@@ -2,146 +2,178 @@ package netchan
 
 import (
 	"reflect"
+	"runtime"
 	"sync"
 	"sync/atomic"
 )
 
-type senderChans struct {
-	credits chan<- int
-	quit    <-chan struct{}
+// Channels that the sendManager uses to talk to a sendProxy.
+type sChans struct {
+	creditCh chan<- credit
+	done     <-chan struct{}
 }
 
-type openInfo struct {
-	isOpenLocal  bool
-	isOpenRemote bool
-	id           int
-	initCred     int
-	dataChan     reflect.Value
+// Various info on a channel open for sending.
+type sChanInfo struct {
+	isOpenLocal    bool
+	isOpenRemote   bool
+	id, initCredit int
+	sChans
 }
 
+// Keeps track of all channels open for sending.
 type sendTable struct {
 	sync.Mutex
-	chans  map[int]senderChans
-	info   map[string]openInfo
-	isOpen map[string]struct{}
+	chans  map[int]sChans
+	chInfo map[string]sChanInfo
 }
 
-type sender struct {
-	id        int
-	name      string
-	mn        *Session
-	dataChan  reflect.Value // <-chan T
-	credits   <-chan int
-	toEncoder chan<- userData
-	quit      chan<- struct{}
-	table     *sendTable // table of the send manager
+// A sendProxy takes data from a channel and forwards it to the encoder.
+// It also holds the credits for that channel.
+type sendProxy struct {
+	ssn       *Session
+	chId      int
+	chName    string
+	dataCh    reflect.Value // <-chan T
+	creditCh  <-chan credit
+	toEncoder chan<- data
+	done      chan<- struct{}
+	table     *sendTable // table of the sendManager
 
 	credit        int
 	batchLenStats stats
-	creditStats   stats
 }
 
-func (s *sender) sendToEncoder(data userData) {
-	// Simply sending to the encoder leads to deadlocks,
-	// keep processing credits
+func (s *sendProxy) sendToEncoder(dat data) {
+	// To keep the credit flow going and avoid deadlocks, the sendProxy must never do
+	// blocking operations without a select case that receives credits.
+	// Mind the side effect.
 	for {
 		select {
-		case s.toEncoder <- data:
+		case s.toEncoder <- dat:
 			return
-		case cred := <-s.credits:
-			s.creditStats.update(float64(cred))
-			s.credit += cred
-		case <-s.mn.Done():
+		case c := <-s.creditCh:
+			s.credit += c.amount
+		case <-s.ssn.Done():
 			return
 		}
 	}
 }
 
-func (s *sender) run() {
-	batchType := reflect.SliceOf(s.dataChan.Type().Elem())
-	batchLenPt := new(int64)
-	*batchLenPt = 1
-	defer func() {
-		close(s.quit)
-		logDebug("netchan session %d: stats for channel send%d (%s) follow;\n"+
-			"\tlength of batches: %s\n\tcredit messages: %s",
-			s.mn.id, s.id, s.name, &s.batchLenStats, &s.creditStats)
-	}()
+func (s *sendProxy) tryRecvCredit() {
+	select {
+	case c := <-s.creditCh:
+		s.credit += c.amount
+		return
+	default:
+	}
+	runtime.Gosched()
+	select {
+	case c := <-s.creditCh:
+		s.credit += c.amount
+	default:
+	}
+}
 
-	recvSomething := [3]reflect.SelectCase{
-		{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(s.credits)},
-		{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(s.mn.Done())},
-		{Dir: reflect.SelectRecv, Chan: s.dataChan},
+func (s *sendProxy) run() {
+	defer close(s.done)
+
+	// send the wantToSend message and receive the initial credit
+	wantToSend := data{header: header{initDataMsg, 0, s.chName}}
+	select {
+	case s.toEncoder <- wantToSend:
+		select {
+		case c := <-s.creditCh:
+			s.chId = c.ChId
+			s.credit = c.amount
+		case <-s.ssn.Done():
+			return
+		}
+	case c := <-s.creditCh:
+		s.chId = c.ChId
+		s.credit = c.amount
+		s.sendToEncoder(wantToSend)
+	case <-s.ssn.Done():
+		return
+	}
+	defer logDebug("netchan session %d: batchLen stats for channel send%d (%s):\n\t%s",
+		s.ssn.id, s.chId, s.chName, &s.batchLenStats)
+
+	batchType := reflect.SliceOf(s.dataCh.Type().Elem())
+	// The encoder will calculate the desired batch length for this channel,
+	// based on the size of the encoded items, and update *batchLenPt for us.
+	batchLenPt := new(int32)
+	*batchLenPt = 10 // initial guess
+	recvDataCases := [...]reflect.SelectCase{
+		{Dir: reflect.SelectRecv, Chan: s.dataCh},
+		{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(s.creditCh)},
+		{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(s.ssn.Done())},
 	}
 	const (
-		recvCredit int = iota
-		recvError
-		recvData
+		recvData int = iota
+		recvCredit
+		recvDone
 	)
 	for {
-		// If no credit, do not receive from user channel (third case).
-		var numCases int
-		if s.credit > 0 {
-			numCases = 3
-		} else {
-			numCases = 2
+		if s.credit <= 0 {
+			select {
+			case c := <-s.creditCh:
+				s.credit += c.amount
+				continue
+			case <-s.ssn.Done():
+				return
+			}
 		}
-		caseI, val, ok := reflect.Select(recvSomething[0:numCases])
-		switch caseI {
-		case recvCredit:
-			cred := val.Int()
-			s.creditStats.update(float64(cred))
-			s.credit += int(cred)
-		case recvError:
-			return
+		i, val, ok := reflect.Select(recvDataCases[:])
+		switch i {
 		case recvData:
 			if !ok {
-				s.sendToEncoder(userData{header: header{closeMsg, s.id, ""}})
+				s.sendToEncoder(data{header: header{closeMsg, s.chId, ""}})
 				s.table.Lock()
-				delete(s.table.chans, s.id)
-				delete(s.table.isOpen, s.name)
+				delete(s.table.chans, s.chId)
+				delete(s.table.chInfo, s.chName)
 				s.table.Unlock()
 				logDebug("netchan session %d: channel send%d (%s) closed",
-					s.mn.id, s.id, s.name)
+					s.ssn.id, s.chId, s.chName)
 				return
 			}
 			s.credit--
-			batch := reflect.MakeSlice(batchType, 1, 1)
+			batch := reflect.MakeSlice(batchType, 1, 8)
 			batch.Index(0).Set(val)
-			batchLen := int(atomic.LoadInt64(batchLenPt))
-			for i := 1; i < batchLen && s.credit > 0; i++ {
-				val, ok := s.dataChan.TryRecv()
-				if !ok { // no items available or channel closed
+			batchLen := int(atomic.LoadInt32(batchLenPt))
+			for i := 1; i < batchLen; i++ {
+				if s.credit <= 0 {
+					s.tryRecvCredit()
+					if s.credit <= 0 {
+						break
+					}
+				}
+				val, ok := s.dataCh.TryRecv()
+				if val == (reflect.Value{}) {
+					runtime.Gosched()
+					val, ok = s.dataCh.TryRecv()
+				}
+				if !ok {
 					break
 				}
 				s.credit--
 				batch = reflect.Append(batch, val)
 			}
 			s.batchLenStats.update(float64(batch.Len()))
-			s.sendToEncoder(userData{header{dataMsg, s.id, ""}, batch, batchLenPt})
+			s.sendToEncoder(data{header{dataMsg, s.chId, ""}, batch, batchLenPt})
+		case recvCredit:
+			s.credit += val.Interface().(credit).amount
+		case recvDone:
+			return
 		}
 	}
 }
 
 type sendManager struct {
-	credits   <-chan credit   // from decoder
-	toEncoder chan<- userData // elements
+	ssn       *Session
+	creditCh  <-chan credit
+	toEncoder chan<- data
 	table     sendTable
-	mn        *Session
-}
-
-// starts sender, table must be locked
-func (m *sendManager) startSender(name string, info openInfo) {
-	credits := make(chan int)
-	quit := make(chan struct{})
-	m.table.chans[info.id] = senderChans{credits, quit}
-
-	go (&sender{info.id, name, m.mn, info.dataChan, credits,
-		m.toEncoder, quit, &m.table, info.initCred, stats{}, stats{}}).run()
-	delete(m.table.info, name)
-	m.table.isOpen[name] = struct{}{}
-
-	logDebug("netchan session %d: channel %s opened as send%d", m.mn.id, name, info.id)
 }
 
 // Open a net-chan for sending.
@@ -156,50 +188,50 @@ func (m *sendManager) startSender(name string, info openInfo) {
 //     In this case, open adds the entry to the pending table (we don't know the channel
 //     id yet), with 0 credit. When the message arrives, we patch the entry with the
 //     credit and move it from the pending table to the final table.
-func (m *sendManager) open(name string, ch reflect.Value) error {
-	m.table.Lock()
-	_, isOpen := m.table.isOpen[name]
-	info := m.table.info[name]
-	if isOpen || info.isOpenLocal {
-		m.table.Unlock()
-		return errAlreadyOpen("Send", name)
+func (s *sendManager) open(chName string, ch reflect.Value) error {
+	s.table.Lock()
+	ci := s.table.chInfo[chName]
+	if ci.isOpenLocal {
+		s.table.Unlock()
+		return fmtErr("channel %s is already open for sending", chName)
 	}
-	if info.isOpenRemote {
-		info.dataChan = ch
-		m.startSender(name, info)
-		m.table.Unlock()
+	ci.isOpenLocal = true
+	creditCh := make(chan credit, internalChCap)
+	done := make(chan struct{}, internalChCap)
+	ci.creditCh = creditCh
+	ci.done = done
+	s.table.chInfo[chName] = ci
+	if ci.isOpenRemote {
+		s.table.chans[ci.id] = sChans{creditCh, done}
+		creditCh <- credit{header{initCreditMsg, ci.id, chName}, ci.initCredit}
+	}
+	s.table.Unlock()
+
+	go (&sendProxy{s.ssn, 0, chName, ch, creditCh,
+		s.toEncoder, done, &s.table, 0, stats{}}).run()
+	if ci.isOpenRemote {
+		logDebug("netchan session %d: channel %s opened as send%d",
+			s.ssn.id, chName, ci.id)
 		return nil
 	}
-	m.table.info[name] = openInfo{isOpenLocal: true, dataChan: ch}
-	m.table.Unlock()
-
-	logDebug("netchan session %d: opening channel %s for sending", m.mn.id, name)
-	go func() {
-		select {
-		case m.toEncoder <- userData{header: header{initDataMsg, 0, name}}:
-		case <-m.mn.Done():
-		}
-	}()
+	logDebug("netchan session %d: opening channel %s for sending", s.ssn.id, chName)
 	return nil
 }
 
 // Got a credit from the decoder.
-func (m *sendManager) handleCredit(cred credit) error {
-	m.table.Lock()
-	chans, present := m.table.chans[cred.Id]
-	m.table.Unlock()
+func (s *sendManager) handleCredit(cred credit) {
+	s.table.Lock()
+	chs, present := s.table.chans[cred.ChId]
+	s.table.Unlock()
 	if !present {
 		// It may happen that the entry is not present,
-		// because the net-chan has just been closed; no problem.
-		return nil
+		// because the net-chan has just been closed; no problems.
+		return
 	}
-
-	// If it's not shutting down, the sender is always ready to receive credit.
 	select {
-	case chans.credits <- cred.amount:
-	case <-chans.quit: // net-chan closed or error occurred
+	case chs.creditCh <- cred:
+	case <-chs.done:
 	}
-	return nil
 }
 
 // A couple of checks to make sure that the other peer is not trying to force us to
@@ -212,48 +244,47 @@ func (m *sendManager) handleCredit(cred credit) error {
 const maxHalfOpen = 256
 
 // An initial credit arrived.
-func (m *sendManager) handleInitCredit(cred credit) error {
-	m.table.Lock()
-	defer m.table.Unlock()
-
-	_, isOpen := m.table.isOpen[cred.Name]
-	info := m.table.info[cred.Name]
-	if isOpen || info.isOpenRemote {
-		return newErr("received initial credit for already open channel")
+func (s *sendManager) handleInitCredit(cred credit) error {
+	s.table.Lock()
+	ci := s.table.chInfo[cred.ChName]
+	if ci.isOpenRemote {
+		s.table.Unlock()
+		return fmtErr("received initial credit for already open channel")
 	}
-	if info.isOpenLocal {
-		info.id = cred.Id
-		info.initCred = cred.amount
-		m.startSender(cred.Name, info)
+	ci.isOpenRemote = true
+	ci.id = cred.ChId
+	ci.initCredit = cred.amount
+	s.table.chInfo[cred.ChName] = ci
+	if ci.isOpenLocal {
+		s.table.chans[cred.ChId] = ci.sChans
+		ci.creditCh <- cred
+	}
+	halfOpen := len(s.table.chInfo) - len(s.table.chans)
+	s.table.Unlock()
+
+	if ci.isOpenLocal {
+		logDebug("netchan session %d: channel %s opened as send%d",
+			s.ssn.id, cred.ChName, ci.id)
 		return nil
 	}
-	// User didn't call Open(Send) yet.
-	if len(m.table.info) >= maxHalfOpen {
-		return newErr("too many half open channels")
-	}
-	m.table.info[cred.Name] =
-		openInfo{isOpenRemote: true, id: cred.Id, initCred: cred.amount}
 	logDebug("netchan session %d: peer wants to receive on channel %s",
-		m.mn.id, cred.Name)
+		s.ssn.id, cred.ChName)
+	if halfOpen >= maxHalfOpen {
+		return fmtErr("too many half open channels")
+	}
 	return nil
 }
 
-func (m *sendManager) run() {
-	for cred := range m.credits {
-		err := m.mn.Err()
-		if err != nil {
-			// keep draining credits so that decoder doesn't block sending
-			continue
-		}
-		switch cred.Type {
+func (s *sendManager) run() {
+	for c := range s.creditCh {
+		switch c.Type {
 		case creditMsg:
-			err = m.handleCredit(cred)
+			s.handleCredit(c)
 		case initCreditMsg:
-			err = m.handleInitCredit(cred)
-		}
-		if err != nil {
-			go m.mn.QuitWith(err)
+			err := s.handleInitCredit(c)
+			if err != nil {
+				go s.ssn.QuitWith(err)
+			}
 		}
 	}
-	// An error occurred and decoder shut down.
 }

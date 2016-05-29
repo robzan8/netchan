@@ -2,16 +2,13 @@ package netchan
 
 /* TODO:
 - more tests
-- update docs
-- draw graph documenting components
-- debug logger
+- documentation
 - tune desired batch size
 - adjust ShutDown timeout
+- think about bufio.Writer api
 */
 
 import (
-	"bufio"
-	"encoding/gob"
 	"io"
 	"net"
 	"reflect"
@@ -42,8 +39,8 @@ type once struct {
 // once state
 const (
 	onceNotDone int32 = iota
-	onceDone
 	onceDoing
+	onceDone
 )
 
 func (o *once) Do(f func()) {
@@ -59,8 +56,6 @@ func (o *once) Do(f func()) {
 	f()
 	atomic.StoreInt32(&o.state, onceDone)
 	close(o.done)
-	// Relative order of the last two statements is important
-	// for correctly retrieving Error() after <-ErrorSignal().
 }
 
 // A Manager handles the message traffic of its connection, implementing the netchan
@@ -78,13 +73,14 @@ type Session struct {
 /*
 This graph shows how the goroutines and channels of a manager are organized:
 
- ----> +----------+       +---------+       +---------+       +----------+ ---->
- ----> |  sender  | ----> | encoder | ====> | decoder | ----> | receiver | ---->
- ----> +----------+       +---------+       +---------+       +----------+ ---->
-       [send table]                                           [recv table]
-       +----------+       +---------+       +---------+       +----------+
-       | credRecv | <---- | decoder | <==== | encoder | <---- | credSend |
-       +----------+       +---------+       +---------+       +----------+
+       +-----------+        +---------+       +---------+       +-------------+
+ ====> |  sender   | =====> | encoder | ====> | decoder | ====> | recvManager |
+       +-----------+        +---------+       +---------+       +-------------+
+             ^                                                         ||
+             |                                                         \/
+      +-------------+       +---------+       +---------+        +-----------+
+      | sendManager | <---- | decoder | <==== | encoder | <----- | receiver  | ---->
+      +-------------+       +---------+       +---------+        +-----------+
 
 The sender has a table that contains an entry for each channel that has been opened for
 sending. The user values flow through a pipeline from the sender to the receiver on the
@@ -139,17 +135,9 @@ func NewSession(conn io.ReadWriteCloser) *Session {
 	return NewSessionLimit(conn, defMsgSizeLimit)
 }
 
-type bufReader interface {
-	io.Reader
-	io.ByteReader
-}
+var newSessionId int64
 
-type bufWriter interface {
-	io.Writer
-	Flush() error
-}
-
-var managerId int64
+const internalChCap int = 8
 
 func NewSessionLimit(conn io.ReadWriteCloser, msgSizeLimit int) *Session {
 	if msgSizeLimit < minMsgSizeLimit {
@@ -157,64 +145,45 @@ func NewSessionLimit(conn io.ReadWriteCloser, msgSizeLimit int) *Session {
 	}
 
 	// create all the components, connect them with channels and fire up the goroutines.
-	mnId := atomic.AddInt64(&managerId, 1)
-	recvMn := new(recvManager)
-	sendMn := new(sendManager)
-	mn := &Session{id: mnId, conn: conn, recvMn: recvMn, sendMn: sendMn}
-	mn.errOnce.done = make(chan struct{})
-	mn.closeOnce.done = make(chan struct{})
+	ssn := &Session{id: atomic.AddInt64(&newSessionId, 1), conn: conn}
+	ssn.errOnce.done = make(chan struct{})
+	ssn.closeOnce.done = make(chan struct{})
 
-	const chCap int = 8
-	recvMnCh := make(chan userData, chCap)
-	sendMnCh := make(chan credit, chCap)
-	encData := make(chan userData, chCap)
-	encCredits := make(chan credit, chCap)
+	encDataCh := make(chan data, internalChCap)
+	encCredCh := make(chan credit, internalChCap)
+	decDataCh := make(chan data, internalChCap)
+	decCredCh := make(chan credit, internalChCap)
 
-	enc := &encoder{dataCh: encData, credits: encCredits, mn: mn}
-	bw, ok := conn.(bufWriter)
-	if !ok {
-		bw = bufio.NewWriter(conn)
-	}
-	enc.flushFn = bw.Flush
-	enc.countWr = countWriter{w: bw}
-	enc.enc = gob.NewEncoder(&enc.countWr)
+	enc := newEncoder(ssn, encDataCh, encCredCh, conn)
+	dec := newDecoder(ssn, decDataCh, decCredCh, conn, msgSizeLimit)
 
-	dec := &decoder{toRecvMn: recvMnCh, toSendMn: sendMnCh, mn: mn,
-		msgSizeLimit: msgSizeLimit}
-	br, ok := conn.(bufReader)
-	if !ok {
-		br = bufio.NewReader(conn)
-	}
-	dec.types.elemType = make(map[int]reflect.Type)
-	dec.limitedRd = limitedReader{bufReader: br}
-	dec.dec = gob.NewDecoder(&dec.limitedRd)
+	recvMn := &recvManager{ssn: ssn, dataCh: decDataCh, toEncoder: encCredCh,
+		types: &dec.types}
+	recvMn.table.buffer = make(map[int]*buffer)
+	recvMn.table.chInfo = make(map[string]rChanInfo)
+	ssn.recvMn = recvMn
+	sendMn := &sendManager{ssn: ssn, creditCh: decCredCh, toEncoder: encDataCh}
+	sendMn.table.chans = make(map[int]sChans)
+	sendMn.table.chInfo = make(map[string]sChanInfo)
+	ssn.sendMn = sendMn
 
-	*recvMn = recvManager{dataChan: recvMnCh, toEncoder: encCredits,
-		types: &dec.types, mn: mn}
-	recvMn.table.entry = make(map[int]recvEntry)
-	recvMn.table.isOpen = make(map[string]struct{})
-	*sendMn = sendManager{credits: sendMnCh, toEncoder: encData, mn: mn}
-	sendMn.table.chans = make(map[int]senderChans)
-	sendMn.table.info = make(map[string]openInfo)
-	sendMn.table.isOpen = make(map[string]struct{})
-
-	go recvMn.run()
-	go sendMn.run()
 	go enc.run()
 	go dec.run()
+	go recvMn.run()
+	go sendMn.run()
 
 	netConn, ok := conn.(net.Conn)
 	if ok {
-		logDebug("manager %d started on connection (local %s, remote %s)",
-			mnId, netConn.LocalAddr(), netConn.RemoteAddr())
+		logDebug("netchan session %d started on connection (local %s, remote %s)",
+			ssn.id, netConn.LocalAddr(), netConn.RemoteAddr())
 	} else {
-		logDebug("manager %d started", mnId)
+		logDebug("netchan session %d started", ssn.id)
 	}
 	go func() {
-		<-mn.Done()
-		logDebug("manager %d shut down with error: %s", mnId, mn.Err())
+		<-ssn.Done()
+		logDebug("netchan session %d shut down with error: %s", ssn.id, ssn.Err())
 	}()
-	return mn
+	return ssn
 }
 
 // Open method opens a net-chan with the given name and direction on the connection
@@ -238,31 +207,31 @@ func NewSessionLimit(conn io.ReadWriteCloser, msgSizeLimit int) *Session {
 // will not be lost.
 func (m *Session) OpenSend(name string, channel interface{}) error {
 	if len(name) > maxNameLen {
-		return newErr("OpenSend: name too long")
+		return fmtErr("OpenSend: name too long")
 	}
 	ch := reflect.ValueOf(channel)
 	if ch.Kind() != reflect.Chan {
-		return newErr("OpenSend: channel arg is not a channel")
+		return fmtErr("OpenSend: channel arg is not a channel")
 	}
 	if ch.Type().ChanDir()&reflect.RecvDir == 0 {
-		return newErr("OpenSend requires a <-chan")
+		return fmtErr("OpenSend requires a <-chan")
 	}
 	return m.sendMn.open(name, ch)
 }
 
 func (m *Session) OpenRecv(name string, channel interface{}, bufferCap int) error {
 	if len(name) > maxNameLen {
-		return newErr("OpenRecv: name too long")
+		return fmtErr("OpenRecv: name too long")
 	}
 	ch := reflect.ValueOf(channel)
 	if ch.Kind() != reflect.Chan {
-		return newErr("OpenRecv channel is not a channel")
+		return fmtErr("OpenRecv channel is not a channel")
 	}
 	if ch.Type().ChanDir()&reflect.SendDir == 0 {
-		return newErr("OpenRecv requires a chan<-")
+		return fmtErr("OpenRecv requires a chan<-")
 	}
 	if bufferCap <= 0 {
-		return newErr("OpenRecv bufferCap must be at least 1")
+		return fmtErr("OpenRecv bufferCap must be at least 1")
 	}
 	return m.recvMn.open(name, ch, bufferCap)
 }

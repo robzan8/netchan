@@ -16,8 +16,8 @@ type benchTask struct {
 
 const (
 	// should agree with the one defined in package netchan (enc_dec.go)
-	wantBatchSize = 512
-	wantBufSize   = 2048
+	wantBatchSize = 4096
+	wantBufSize   = 4096
 )
 
 func executeTask(task benchTask, mn *netchan.Session) {

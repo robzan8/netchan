@@ -31,7 +31,7 @@ func newPipeConn() (sideA, sideB pipeConn) {
 }
 
 func init() {
-	log.SetFlags(log.LstdFlags | log.Lshortfile)
+	log.SetFlags(0)
 }
 
 // intProducer sends integers from 0 to n-1 on net-chan chName

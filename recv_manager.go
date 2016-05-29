@@ -11,15 +11,16 @@ type buffer struct {
 
 	// ch holds batches of items.
 	// Keeping batches as interface{} instead of reflect.Values saves some memory.
-	ch     chan interface{}
-	errSig <-chan struct{}
+	ch      chan interface{}
+	ssnDone <-chan struct{}
+	chName  string
 }
 
-func newBuffer(cap int, errSig <-chan struct{}) *buffer {
+func newBuffer(cap int, ssnDone <-chan struct{}, chName string) *buffer {
 	// The buffer must be able to hold cap items, we only store batches with non-zero
 	// length, so allocating memory for cap batches is sufficient and sometimes more than
 	// necessary; a smarter implementation could save some memory by allocating lazily.
-	return &buffer{int64(cap), 0, make(chan interface{}, cap), errSig}
+	return &buffer{int64(cap), 0, make(chan interface{}, cap), ssnDone, chName}
 }
 
 func (b *buffer) put(batch reflect.Value) error {
@@ -28,7 +29,7 @@ func (b *buffer) put(batch reflect.Value) error {
 	}
 	length := atomic.AddInt64(&b.len, int64(batch.Len()))
 	if length > b.cap {
-		return newErr("peer sent more than its credit allowed")
+		return fmtErr("peer sent more than its credit allowed")
 	}
 	select {
 	case b.ch <- batch.Interface():
@@ -38,12 +39,9 @@ func (b *buffer) put(batch reflect.Value) error {
 	}
 }
 
-func (b *buffer) get() (batch reflect.Value, ok, err bool) {
+func (b *buffer) get() (batch reflect.Value, ok, done bool) {
 	var batchE interface{}
 	select {
-	case <-b.errSig:
-		err = true
-		return
 	case batchE, ok = <-b.ch:
 		if !ok {
 			return
@@ -51,71 +49,68 @@ func (b *buffer) get() (batch reflect.Value, ok, err bool) {
 		batch = reflect.ValueOf(batchE)
 		atomic.AddInt64(&b.len, -int64(batch.Len()))
 		return
+	case <-b.ssnDone:
+		done = true
+		return
 	}
 }
 
 func (b *buffer) close() { close(b.ch) }
 
-type recvEntry struct {
-	buf  *buffer
-	name string
-}
-
-type chanState struct {
-	isOpenLocal, isOpenRemote bool
-	id                        int
+type rChanInfo struct {
+	isOpenLocal  bool
+	isOpenRemote bool
+	id           int
 }
 
 type recvTable struct {
 	sync.Mutex
-	entry   map[int]recvEntry
-	chState map[string]chanState
+	buffer map[int]*buffer
+	chInfo map[string]rChanInfo
 }
 
-type receiver struct {
-	id        int
-	name      string
-	mn        *Session
+type recvProxy struct {
+	ssn       *Session
+	chId      int
+	chName    string
 	buf       *buffer
-	dataChan  reflect.Value // chan<- elemType
+	dataCh    reflect.Value // chan<- T
 	toEncoder chan<- credit
 }
 
-func (r *receiver) sendToUser(val reflect.Value) {
-	// Fast path: try sending without involving ErrorSignal.
-	ok := r.dataChan.TrySend(val)
+func (r *recvProxy) sendToUser(val reflect.Value) {
+	ok := r.dataCh.TrySend(val)
 	if ok {
 		return
 	}
-	// Slow path, must use reflect.Select
-	sendOrErr := [...]reflect.SelectCase{
-		{Dir: reflect.SelectSend, Chan: r.dataChan, Send: val},
-		{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(r.mn.Done())},
+	// Slow path.
+	sendOrDone := [...]reflect.SelectCase{
+		{Dir: reflect.SelectSend, Chan: r.dataCh, Send: val},
+		{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(r.ssn.Done())},
 	}
-	reflect.Select(sendOrErr[:])
+	reflect.Select(sendOrDone[:])
 }
 
-func (r *receiver) sendToEncoder(cred credit) {
+func (r *recvProxy) sendToEncoder(cred credit) {
 	select {
 	case r.toEncoder <- cred:
-	case <-r.mn.Done():
+	case <-r.ssn.Done():
 	}
 }
 
-func (r *receiver) run() {
-	r.sendToEncoder(credit{header{initCreditMsg, r.id, r.name}, int(r.buf.cap)})
+func (r *recvProxy) run() {
+	r.sendToEncoder(credit{header{initCreditMsg, r.chId, r.chName}, int(r.buf.cap)})
 	for {
-		batch, ok, err := r.buf.get()
-		if err {
+		batch, ok, done := r.buf.get()
+		if done {
 			return
 		}
 		if !ok {
-			r.dataChan.Close()
-			// recvManager deletes the entry
+			r.dataCh.Close()
 			return
 		}
 		batchLen := batch.Len()
-		r.sendToEncoder(credit{header{creditMsg, r.id, ""}, batchLen})
+		r.sendToEncoder(credit{header{creditMsg, r.chId, ""}, batchLen})
 		for i := 0; i < batchLen; i++ {
 			r.sendToUser(batch.Index(i))
 		}
@@ -123,105 +118,116 @@ func (r *receiver) run() {
 }
 
 type recvManager struct {
-	dataChan  <-chan userData // from decoder
-	toEncoder chan<- credit   // credits
+	ssn       *Session
+	dataCh    <-chan data
+	toEncoder chan<- credit
 	table     recvTable
+	newChId   int        // protected by table's mutex
 	types     *typeTable // decoder's
-	mn        *Session
-	newId     int
 }
 
 // Open a net-chan for receiving.
-func (m *recvManager) open(name string, ch reflect.Value, bufCap int) error {
-	m.table.Lock()
-	defer m.table.Unlock()
-
-	_, present := m.table.isOpen[name]
-	if present {
-		return errAlreadyOpen("Recv", name)
+func (r *recvManager) open(chName string, ch reflect.Value, bufCap int) error {
+	r.table.Lock()
+	ci := r.table.chInfo[chName]
+	if ci.isOpenLocal {
+		r.table.Unlock()
+		return fmtErr("channel %s is already open for receiving", chName)
 	}
+	r.newChId++
+	ci.isOpenLocal = true
+	ci.id = r.newChId
+	r.table.chInfo[chName] = ci
+	buf := newBuffer(bufCap, r.ssn.Done(), chName)
+	r.table.buffer[ci.id] = buf
 
-	m.types.Lock()
-	defer m.types.Unlock()
+	r.types.Lock()
+	r.types.batchType[ci.id] = reflect.SliceOf(ch.Type().Elem())
+	r.types.Unlock()
 
-	m.newId++
-	buf := newBuffer(bufCap, m.mn.Done())
-	m.table.entry[m.newId] = recvEntry{buf, name}
-	m.table.isOpen[name] = struct{}{}
-	m.types.elemType[m.newId] = ch.Type().Elem()
+	r.table.Unlock()
 
-	go (&receiver{m.newId, name, m.mn, buf, ch, m.toEncoder}).run()
+	go (&recvProxy{r.ssn, ci.id, chName, buf, ch, r.toEncoder}).run()
+	if ci.isOpenRemote {
+		logDebug("netchan session %d: channel %s opened as recv%d",
+			r.ssn.id, chName, ci.id)
+		return nil
+	}
+	logDebug("netchan session %d: opening channel %s for receiving", r.ssn.id, chName)
 	return nil
 }
 
 // Got an element from the decoder.
-func (m *recvManager) handleUserData(id int, batch reflect.Value) error {
-	m.table.Lock()
-	entry, present := m.table.entry[id]
-	m.table.Unlock()
+func (r *recvManager) handleData(dat data) error {
+	r.table.Lock()
+	buf, present := r.table.buffer[dat.ChId]
+	r.table.Unlock()
 	if !present {
-		return newErr("data arrived for closed net-chan")
+		return fmtErr("data arrived for closed net-chan")
 	}
-	return entry.buf.put(batch)
+	return buf.put(dat.batch)
 }
 
-func (m *recvManager) handleInitData(chName string) error {
-	m.table.Lock()
-	s := m.table.chState[chName]
-	if s.isOpenRemote {
-		m.table.Unlock()
-		return newErr("initial data received twice for the same channel")
+func (r *recvManager) handleInitData(dat data) error {
+	r.table.Lock()
+	ci := r.table.chInfo[dat.ChName]
+	if ci.isOpenRemote {
+		r.table.Unlock()
+		return fmtErr("initial data received twice for the same channel")
 	}
-	s.isOpenRemote = true
-	m.table.chState[chName] = s
-	m.table.Unlock()
+	ci.isOpenRemote = true
+	r.table.chInfo[dat.ChName] = ci
+	halfOpen := len(r.table.chInfo) - len(r.table.buffer)
+	r.table.Unlock()
 
-	if s.isOpenLocal {
+	if ci.isOpenLocal {
 		logDebug("netchan session %d: channel %s opened as recv%d",
-			m.mn.id, chName, s.chId)
+			r.ssn.id, dat.ChName, ci.id)
 	} else {
 		logDebug("netchan session %d: peer wants to send on channel %s",
-			m.mn.id, chName)
+			r.ssn.id, dat.ChName)
+	}
+	if halfOpen >= maxHalfOpen {
+		return fmtErr("too many half open channels")
 	}
 	return nil
 }
 
-func (m *recvManager) handleClose(id int) error {
-	m.table.Lock()
-	entry, present := m.table.entry[id]
+func (r *recvManager) handleClose(dat data) error {
+	r.table.Lock()
+	buf, present := r.table.buffer[dat.ChId]
 	if !present {
-		m.table.Unlock()
-		return newErr("end of stream message arrived for closed net-chan")
+		r.table.Unlock()
+		return fmtErr("close message arrived for already closed channel")
 	}
-	m.types.Lock()
-	delete(m.table.entry, id)
-	delete(m.table.isOpen, entry.name)
-	delete(m.types.elemType, id)
-	m.types.Unlock()
-	m.table.Unlock()
+	delete(r.table.buffer, dat.ChId)
+	delete(r.table.chInfo, buf.chName)
 
-	entry.buf.close()
+	r.types.Lock()
+	delete(r.types.batchType, dat.ChId)
+	r.types.Unlock()
+
+	r.table.Unlock()
+
+	buf.close()
+	logDebug("netchan session %d: channel recv%d (%s) closed",
+		r.ssn.id, dat.ChId, buf.chName)
 	return nil
 }
 
-func (m *recvManager) run() {
-	for data := range m.dataChan {
-		err := m.mn.Err()
-		if err != nil {
-			// keep draining dataChan so that decoder doesn't block sending
-			continue
-		}
-		switch data.Type {
+func (r *recvManager) run() {
+	for d := range r.dataCh {
+		var err error
+		switch d.Type {
 		case dataMsg:
-			err = m.handleUserData(data.Id, data.batch)
+			err = r.handleData(d)
 		case initDataMsg:
-			// log
+			err = r.handleInitData(d)
 		case closeMsg:
-			err = m.handleClose(data.Id)
+			err = r.handleClose(d)
 		}
 		if err != nil {
-			go m.mn.QuitWith(err)
+			go r.ssn.QuitWith(err)
 		}
 	}
-	// An error occurred and decoder shut down.
 }

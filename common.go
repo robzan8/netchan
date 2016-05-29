@@ -26,17 +26,17 @@ const (
 
 // preceedes every message
 type header struct {
-	Type msgType
-	Id   int
-	Name string
+	Type   msgType
+	ChId   int
+	ChName string
 }
 
 type hello struct{}
 
-type userData struct {
+type data struct {
 	header
 	batch      reflect.Value
-	batchLenPt *int64
+	batchLenPt *int32
 }
 
 type credit struct {
@@ -44,14 +44,6 @@ type credit struct {
 	amount int
 }
 
-func newErr(str string) error {
-	return errors.New("netchan: " + str)
-}
-
 func fmtErr(format string, a ...interface{}) error {
 	return fmt.Errorf("netchan: "+format, a...)
-}
-
-func errAlreadyOpen(dir, name string) error {
-	return fmtErr("Open%s: net-chan %s is already open", dir, name)
 }

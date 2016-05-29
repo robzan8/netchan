@@ -1,66 +1,81 @@
 package netchan
 
 import (
+	"bufio"
 	"encoding/gob"
 	"errors"
 	"io"
 	"reflect"
+	"runtime"
 	"sync"
 	"sync/atomic"
 )
 
+type bufWriter interface {
+	io.Writer
+	Flush() error
+}
+
 type countWriter struct {
-	w io.Writer
-	n int
+	w          io.Writer
+	batchBytes int
+	flushBytes int
 }
 
 func (c *countWriter) Write(data []byte) (n int, err error) {
 	n, err = c.w.Write(data)
-	c.n += n
+	c.batchBytes += n
+	c.flushBytes += n
 	return
 }
 
 type encoder struct {
-	dataCh  <-chan userData
-	credits <-chan credit
-	mn      *Session
-	flushFn func() error
-	countWr countWriter
-	enc     *gob.Encoder
+	ssn      *Session
+	dataCh   <-chan data
+	creditCh <-chan credit
+	countWr  countWriter
+	enc      *gob.Encoder
+	flush    func() error
 
-	err error
+	err        error
+	flushStats stats
+}
+
+func newEncoder(ssn *Session, dataCh <-chan data, creditCh <-chan credit,
+	conn io.Writer) *encoder {
+	e := &encoder{ssn: ssn, dataCh: dataCh, creditCh: creditCh}
+	bw, ok := conn.(bufWriter)
+	if !ok {
+		bw = bufio.NewWriter(conn)
+	}
+	e.countWr = countWriter{w: bw}
+	e.enc = gob.NewEncoder(&e.countWr)
+	e.flush = bw.Flush
+	return e
 }
 
 func (e *encoder) encode(val interface{}) {
-	// when an encoding/transmission error occurs,
-	// encode and flush operations turn into NOPs
+	// when an encoding error occurs, encode operations turn into NOPs
 	if e.err != nil {
 		return
 	}
 	e.err = e.enc.EncodeValue(reflect.ValueOf(val))
 }
 
-func (e *encoder) flush() {
+const wantBatchSize = 4096
+
+func (e *encoder) handleData(dat data) {
+	e.encode(dat.header)
+	if e.err != nil || dat.Type == initDataMsg || dat.Type == closeMsg {
+		return
+	}
+	// dat.Type is dataMsg
+	e.countWr.batchBytes = 0
+	e.err = e.enc.EncodeValue(dat.batch)
 	if e.err != nil {
 		return
 	}
-	e.err = e.flushFn()
-}
-
-const wantBatchSize = 512
-
-func (e *encoder) handleData(data userData) {
-	e.encode(data.header)
-	if e.err != nil || data.Type == initDataMsg || data.Type == closeMsg {
-		return
-	}
-	// data.Type is dataMsg
-	e.countWr.n = 0
-	e.err = e.enc.EncodeValue(data.batch)
-	if e.err != nil {
-		return
-	}
-	itemSize := float64(e.countWr.n) / float64(data.batch.Len())
+	itemSize := float64(e.countWr.batchBytes) / float64(dat.batch.Len())
 	if itemSize < 1 {
 		itemSize = 1
 	}
@@ -68,119 +83,140 @@ func (e *encoder) handleData(data userData) {
 	if wantBatchLen < 1 {
 		wantBatchLen = 1
 	}
-	batchLen := float64(*data.batchLenPt)
+	batchLen := float64(*dat.batchLenPt)
 	if batchLen < wantBatchLen*0.75 || batchLen > wantBatchLen*1.25 {
-		intLen := int64(wantBatchLen + 0.5)
-		atomic.StoreInt64(data.batchLenPt, intLen)
-		logDebug("manager %d, channel send-%d: batch length changed to %d",
-			e.mn.id, data.Id, intLen)
+		atomic.StoreInt32(dat.batchLenPt, int32(wantBatchLen))
 	}
 }
 
 func (e *encoder) bufAndFlush() {
-CreditsLoop:
-	for i := 0; i < cap(e.credits); i++ {
+	for i := 0; i < cap(e.creditCh); i++ {
 		select {
-		case cred := <-e.credits:
-			e.encode(cred.header)
-			e.encode(cred.amount)
+		case c := <-e.creditCh:
+			e.encode(c.header)
+			e.encode(c.amount)
+			continue
 		default:
-			break CreditsLoop
 		}
+		break
 	}
-DataLoop:
 	for i := 0; i < cap(e.dataCh); i++ {
 		select {
-		case data := <-e.dataCh:
-			e.handleData(data)
+		case d := <-e.dataCh:
+			e.handleData(d)
+			continue
 		default:
-			break DataLoop
 		}
+		runtime.Gosched()
+		select {
+		case d := <-e.dataCh:
+			e.handleData(d)
+			continue
+		default:
+		}
+		break
 	}
-	e.flush()
+	if e.err != nil {
+		return
+	}
+	e.flushStats.update(float64(e.countWr.flushBytes))
+	e.countWr.flushBytes = 0
+	e.err = e.flush()
 }
 
 func (e *encoder) run() {
-	errorSignal := e.mn.Done()
-
 	e.encode(header{Type: helloMsg})
 	e.encode(hello{})
 	e.bufAndFlush()
 Loop:
 	for {
 		if e.err != nil {
-			e.mn.QuitWith(e.err)
+			e.ssn.QuitWith(e.err)
 			return
 		}
 		select {
-		case data := <-e.dataCh:
-			e.handleData(data)
-		case cred := <-e.credits:
-			e.encode(cred.header)
-			e.encode(cred.amount)
-		case <-errorSignal:
+		case d := <-e.dataCh:
+			e.handleData(d)
+		case c := <-e.creditCh:
+			e.encode(c.header)
+			e.encode(c.amount)
+		case <-e.ssn.Done():
 			break Loop
 		}
 		e.bufAndFlush()
 	}
 
 	e.encode(header{Type: errorMsg})
-	e.encode(e.mn.Err().Error())
+	e.encode(e.ssn.Err().Error())
 	e.flush()
-	e.mn.closeConn()
+	logDebug("netchan session %d is done, flushBytes stats:\n\t%s",
+		e.ssn.id, &e.flushStats)
+	e.ssn.closeConn()
+}
+
+type bufReader interface {
+	io.Reader
+	io.ByteReader
 }
 
 // Like io.LimitedReader, but returns a custom error.
-// TODO: preserve ReadByte method of underlying reader
 type limitedReader struct {
 	bufReader     // underlying reader
-	N         int // max bytes remaining
+	n         int // max bytes remaining
 }
 
-var errMsgTooBig = newErr("too big gob message received")
+var errMsgTooBig = fmtErr("too big gob message received")
 
-func (l *limitedReader) Read(p []byte) (n int, err error) {
-	if l.N <= 0 {
+func (l *limitedReader) Read(p []byte) (m int, err error) {
+	if l.n <= 0 {
 		return 0, errMsgTooBig
 	}
-	if len(p) > l.N {
-		p = p[0:l.N]
+	if len(p) > l.n {
+		p = p[0:l.n]
 	}
-	n, err = l.bufReader.Read(p)
-	l.N -= n
+	m, err = l.bufReader.Read(p)
+	l.n -= m
 	return
 }
 
 type typeTable struct {
 	sync.Mutex
-	elemType map[int]reflect.Type
+	batchType map[int]reflect.Type
 }
 
 type decoder struct {
-	toRecvMn     chan<- userData
+	ssn          *Session
+	toRecvMn     chan<- data
 	toSendMn     chan<- credit
-	types        typeTable // updated by recvManager
-	mn           *Session
 	msgSizeLimit int
+	types        typeTable // updated by recvManager
 	limitedRd    limitedReader
 	dec          *gob.Decoder
 }
 
-func (d *decoder) decodeVal(val reflect.Value) error {
-	// reset the limit before each Decode invocation
-	d.limitedRd.N = d.msgSizeLimit
-	return d.dec.DecodeValue(val)
+func newDecoder(ssn *Session, dataCh chan<- data, creditCh chan<- credit,
+	conn io.Reader, lim int) *decoder {
+	d := &decoder{ssn: ssn, toRecvMn: dataCh, toSendMn: creditCh, msgSizeLimit: lim}
+	d.types.batchType = make(map[int]reflect.Type)
+	br, ok := conn.(bufReader)
+	if !ok {
+		br = bufio.NewReader(conn)
+	}
+	d.limitedRd = limitedReader{bufReader: br}
+	d.dec = gob.NewDecoder(&d.limitedRd)
+	return d
 }
 
 func (d *decoder) decode(val interface{}) error {
-	return d.decodeVal(reflect.ValueOf(val))
+	d.limitedRd.n = d.msgSizeLimit
+	return d.dec.DecodeValue(reflect.ValueOf(val))
 }
 
 func (d *decoder) run() (err error) {
 	defer func() {
 		close(d.toRecvMn)
 		close(d.toSendMn)
-		d.mn.QuitWith(err)
+		d.ssn.QuitWith(err)
 	}()
 
 	var h header
@@ -197,7 +233,7 @@ func (d *decoder) run() (err error) {
 		return
 	}
 	for {
-		if err = d.mn.Err(); err != nil {
+		if err = d.ssn.Err(); err != nil {
 			return
 		}
 		var h header
@@ -205,46 +241,54 @@ func (d *decoder) run() (err error) {
 		if err != nil {
 			return
 		}
+		// check h.ChName length?
 		switch h.Type {
 		case helloMsg:
-			return newErr("hello message received again")
+			return fmtErr("hello message received again")
 
 		case dataMsg:
 			d.types.Lock()
-			elemType, present := d.types.elemType[h.Id] // make sliceType directly
+			batchType, present := d.types.batchType[h.ChId]
 			d.types.Unlock()
 			if !present {
-				return fmtErr("message with invalid ID received (%d)\n", h.Id)
+				return fmtErr("message with invalid ID received (%d)\n", h.ChId)
 			}
-			batch := reflect.New(reflect.SliceOf(elemType)).Elem()
-			err = d.decodeVal(batch)
+			batch := reflect.New(batchType).Elem()
+			d.limitedRd.n = d.msgSizeLimit
+			err = d.dec.DecodeValue(batch)
 			if err != nil {
 				return
 			}
-			d.toRecvMn <- userData{header: h, batch: batch}
+			d.toRecvMn <- data{header: h, batch: batch}
 
-		case initDataMsg:
-			d.toRecvMn <- userData{header: h}
-			// move this:
-			logDebug("netchan session %d: peer wants to send on channel %s",
-				d.mn.id, h.Name)
+		case initDataMsg, closeMsg:
+			d.toRecvMn <- data{header: h}
 
-		case closeMsg:
-			d.toRecvMn <- userData{header: h}
-
-		case creditMsg, initCreditMsg:
-			cred := credit{header: h}
-			err = d.decode(&cred.amount)
+		case creditMsg:
+			c := credit{header: h}
+			err = d.decode(&c.amount)
 			if err != nil {
 				return
 			}
-			if cred.amount < 0 {
-				return newErr("received credit with negative amount")
+			// sendManager expects only positive credits.
+			if c.amount == 0 {
+				continue
 			}
-			if len(cred.Name) > maxNameLen {
-				return newErr("received credit with too long net-chan name")
+			if c.amount < 0 {
+				return fmtErr("received credit with negative amount")
 			}
-			d.toSendMn <- cred
+			d.toSendMn <- c
+
+		case initCreditMsg:
+			c := credit{header: h}
+			err = d.decode(&c.amount)
+			if err != nil {
+				return
+			}
+			if c.amount < 1 {
+				return fmtErr("received initial credit with non-positive amount")
+			}
+			d.toSendMn <- c
 
 		case errorMsg:
 			var errStr string

@@ -114,6 +114,13 @@ func Benchmark_Chans1_Size100(b *testing.B) {
 	<-done
 }
 
+func Benchmark_Chans1_Size10(b *testing.B) {
+	task := benchTask{1, 10, b.N}
+	tasks <- task
+	executeTask(task, mn)
+	<-done
+}
+
 func Benchmark_Chans10_Size100(b *testing.B) {
 	task := benchTask{10, 100, b.N}
 	tasks <- task
