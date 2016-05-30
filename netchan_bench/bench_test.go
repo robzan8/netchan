@@ -73,7 +73,7 @@ func TestMain(m *testing.M) {
 	}()
 	err = mn.OpenSend("tasks", tasks)
 	check(err)
-	err = mn.OpenRecv("done", done, 1)
+	err = mn.OpenRecv("done", done, 10)
 	check(err)
 
 	exitCode := m.Run()

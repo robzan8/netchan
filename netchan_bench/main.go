@@ -17,7 +17,7 @@ type benchTask struct {
 const (
 	// should agree with the one defined in package netchan (enc_dec.go)
 	wantBatchSize = 4096
-	wantBufSize   = 4096
+	wantBufSize   = 100000
 )
 
 func executeTask(task benchTask, mn *netchan.Session) {
@@ -76,7 +76,7 @@ func main() {
 		}
 	}()
 	tasks := make(chan benchTask)
-	err = mn.OpenRecv("tasks", tasks, 1)
+	err = mn.OpenRecv("tasks", tasks, 10)
 	if err != nil {
 		log.Fatal(err)
 	}
