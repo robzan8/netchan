@@ -6,6 +6,7 @@ package netchan
 - tune desired batch size
 - adjust ShutDown timeout
 - think about bufio.Writer api
+- false sharing?
 */
 
 import (

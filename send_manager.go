@@ -149,10 +149,10 @@ func (s *sendProxy) run() {
 					}
 				}
 				val, ok := s.dataCh.TryRecv()
-				if val == (reflect.Value{}) {
+				/*if val == (reflect.Value{}) {
 					runtime.Gosched()
 					val, ok = s.dataCh.TryRecv()
-				}
+				}*/
 				if !ok {
 					break
 				}
