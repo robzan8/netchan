@@ -76,7 +76,7 @@ func main() {
 		}
 	}()
 	tasks := make(chan benchTask)
-	err = mn.OpenRecv("tasks", tasks, 10)
+	err = mn.OpenRecv("tasks", tasks, 1)
 	if err != nil {
 		log.Fatal(err)
 	}
