@@ -86,50 +86,22 @@ func TestMain(m *testing.M) {
 	os.Exit(exitCode)
 }
 
-func Benchmark_Chans20_Size20(b *testing.B) {
-	task := benchTask{20, 20, b.N}
+func Benchmark_Chans1(b *testing.B) {
+	task := benchTask{1, b.N}
 	tasks <- task
 	executeTask(task, mn)
 	<-done
 }
 
-func Benchmark_Chans10_Size1(b *testing.B) {
-	task := benchTask{10, 1, b.N}
+func Benchmark_Chans10(b *testing.B) {
+	task := benchTask{10, b.N}
 	tasks <- task
 	executeTask(task, mn)
 	<-done
 }
 
-func Benchmark_Chans100_Size1(b *testing.B) {
-	task := benchTask{100, 1, b.N}
-	tasks <- task
-	executeTask(task, mn)
-	<-done
-}
-
-func Benchmark_Chans1_Size100(b *testing.B) {
-	task := benchTask{1, 100, b.N}
-	tasks <- task
-	executeTask(task, mn)
-	<-done
-}
-
-func Benchmark_Chans1_Size10(b *testing.B) {
-	task := benchTask{1, 10, b.N}
-	tasks <- task
-	executeTask(task, mn)
-	<-done
-}
-
-func Benchmark_Chans10_Size100(b *testing.B) {
-	task := benchTask{10, 100, b.N}
-	tasks <- task
-	executeTask(task, mn)
-	<-done
-}
-
-func Benchmark_Chans100_Size100(b *testing.B) {
-	task := benchTask{100, 100, b.N}
+func Benchmark_Chans100(b *testing.B) {
+	task := benchTask{100, b.N}
 	tasks <- task
 	executeTask(task, mn)
 	<-done

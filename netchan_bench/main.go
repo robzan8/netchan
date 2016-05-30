@@ -10,24 +10,25 @@ import (
 	"github.com/robzan8/netchan"
 )
 
-type benchTask struct {
-	NumChans, ItemSize, NumItems int
-}
-
 const (
-	// should agree with the one defined in package netchan (enc_dec.go)
-	wantBatchSize = 4096
-	wantBufSize   = 100000
+	itemSize      = 32
+	wantBatchSize = 4096 // should agree with the one defined in package netchan
+	recvBufSize   = 50000
 )
 
+type item [itemSize]byte
+
+type benchTask struct {
+	NumChans, NumItems int
+}
+
 func executeTask(task benchTask, mn *netchan.Session) {
-	item := make([]byte, task.ItemSize)
 	var wg sync.WaitGroup
-	chCap := wantBatchSize / task.ItemSize
-	bufCap := wantBufSize / task.ItemSize
+	chCap := wantBatchSize / itemSize
+	bufCap := recvBufSize / itemSize
 
 	for i := 0; i < task.NumChans; i++ {
-		ch := make(chan []byte, chCap)
+		ch := make(chan item, chCap)
 		err := mn.OpenSend(fmt.Sprintf("items-%d", i), ch)
 		if err != nil {
 			panic(err)
@@ -36,14 +37,14 @@ func executeTask(task benchTask, mn *netchan.Session) {
 		go func() {
 			defer wg.Done()
 			for j := 0; j < task.NumItems; j++ {
-				ch <- item
+				ch <- item{}
 			}
 			close(ch)
 		}()
 	}
 
 	for i := 0; i < task.NumChans; i++ {
-		ch := make(chan []byte, chCap)
+		ch := make(chan item, chCap)
 		err := mn.OpenRecv(fmt.Sprintf("items-%d", i), ch, bufCap)
 		if err != nil {
 			panic(err)
@@ -51,7 +52,7 @@ func executeTask(task benchTask, mn *netchan.Session) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for range ch {
+			for _ = range ch {
 			}
 		}()
 	}
