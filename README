@@ -1,0 +1,4 @@
+netchan!
+
+The code is not really ready for production, more tests are needed and the API documentation is outdated.
+I'm planning to fix it soon, announce it on golang-nuts, etc...
