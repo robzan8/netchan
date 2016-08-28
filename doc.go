@@ -1,4 +1,6 @@
 /*
+WARNING: This documentation is outdated and reflects an older, experimental, version of the API.
+
 Package netchan enables using Go channels to communicate over a network: one peer sends
 messages to a channel and netchan forwards them over a connection to the other peer,
 where they are received from another channel of the same type.
@@ -74,34 +76,5 @@ messages. The sender must never transmit more than its credit allows.
 The receive channel capacity can affect performance: a small buffer could cause the
 sender to suspend often, waiting for credit; a big buffer could avoid suspensions
 completely.
-
-Concurrency patterns
-
-The only restriction that the control flow system imposes is that each net-chan must have
-a dedicated buffered channel for receiving and no one else should be sending to that
-channel. So, to implement a fan-in of net-chans, a goroutine that reads from the various
-buffered channels is necessary.
-
-To implement a fan-out, instead, the same Go channel can be used to open different
-net-chans (possibly on different managers/connections) with Send direction. The messages
-arriving on the channel will be distributed pseudo-randomly to the various net-chans with
-positive credit. This implies that we get automatic load balacing: if one of the
-receivers is slower, it will send credit and thus receive messages at a lower rate.
-Closing the channel will close all the net-chans in the fan-out.
-
-RPC-like functionality can be implemented by sending a request together with a net-chan
-name, that will be opened for the response. However, opening a net-chan for each response
-is not ideal in terms of performance. When possible, model your application logic in
-terms of streams of data instead of requests-responses, it's where netchan and gob shine
-best.
-
-Security
-
-The netchan protocol is designed to be secure, is extremely simple and is tested also
-with go-fuzz (https://github.com/dvyukov/go-fuzz). Given a server that exposes a
-netchan-based API, no malicious client should be able to:
-	- make the server's goroutines panic or deadlock
-	- force the server to allocate a lot of memory
-	- force the server to consume a big amount of CPU time
 */
 package netchan
