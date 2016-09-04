@@ -1,5 +1,6 @@
 /*
-WARNING: This documentation is outdated and reflects an older, experimental, version of the API.
+WARNING: This documentation is outdated and reflects an older version of the library.
+The basic concepts should still be the same.
 
 Package netchan enables using Go channels to communicate over a network: one peer sends
 messages to a channel and netchan forwards them over a connection to the other peer,
