@@ -7,7 +7,7 @@ import (
 )
 
 // EndOfSession is used to signal the graceful end of a netchan session
-// (typically with Manager.ShutDown).
+// (typically with Session.ShutDown).
 var EndOfSession = errors.New("netchan: end of session")
 
 type msgType int
