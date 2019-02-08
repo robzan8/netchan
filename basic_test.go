@@ -5,7 +5,7 @@ import (
 	"io"
 	"log"
 
-	"github.com/robzan8/netchan"
+	"github.com/pinkgopher/netchan"
 )
 
 func checkErrors(mn *netchan.Session) {

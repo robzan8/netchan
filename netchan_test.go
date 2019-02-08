@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/robzan8/netchan"
+	"github.com/pinkgopher/netchan"
 )
 
 // pipeConn represents one side of a full-duplex
